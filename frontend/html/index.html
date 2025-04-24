@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClickHouse Schema Flow Visualizer</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="icon" href="/static/img/favicon.ico" type="image/x-icon">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" crossorigin="anonymous" defer></script>
+</head>
+<body>
+    <header>
+        <h1>ClickHouse Schema Flow Visualizer</h1>
+    </header>
+
+    <main>
+        <div class="container">
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <h2>Databases & Tables</h2>
+                    <button id="refresh-btn" title="Refresh database list">↻</button>
+                </div>
+                <div class="tree-container">
+                    <ul id="database-tree" class="tree-view"></ul>
+                </div>
+            </div>
+
+            <div class="main-panel">
+                <div class="toolbar">
+                    <span id="current-selection"></span>
+                    <div class="export-buttons">
+                        <button id="export-html-btn">Export HTML</button>
+                    </div>
+                </div>
+                <div class="schema-container">
+                    <div class="view-controls">
+                        <button id="zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
+                        <button id="zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
+                        <button id="reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                    </div>
+                    <pre id="schema-diagram"></pre>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>ClickHouse Schema Flow Visualizer</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+---
+
+services:
+  # ClickHouse Schema Flow Visualizer
+  clickhouse-schemaflow-visualizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clickhouse-schemaflow-visualizer
+    ports:
+      - "8080:8080"
+    env_file: ".env"
+    restart: unless-stopped
+    network_mode: "host"
+
+volumes:
+  clickhouse-data:
