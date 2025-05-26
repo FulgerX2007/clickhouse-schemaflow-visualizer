@@ -74,12 +74,122 @@ A powerful open-source web application for visualizing ClickHouse table relation
    cd clickhouse-schemaflow-visualizer
    ```
 
-2. Start the application:
+2. Copy the example environment file and configure it:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your ClickHouse connection details
+   ```
+
+3. Start the application:
    ```bash
    docker-compose up -d
    ```
 
-3. Access the web interface at http://localhost:8080
+4. Access the web interface at http://localhost:8080
+
+### Using Portainer Stack
+
+If you're using Portainer for container management, you can deploy this application as a stack:
+
+1. **Create a new Stack in Portainer**:
+   - Go to Stacks → Add stack
+   - Name: `clickhouse-schemaflow-visualizer`
+
+2. **Use the following Docker Compose content**:
+   ```yaml
+   version: '3.8'
+   
+   services:
+     # ClickHouse Schema Flow Visualizer
+     ch-schemaflow-visualizer:
+       image: ghcr.io/fulgerx2007/clickhouse-schemaflow-visualizer:latest
+       ports:
+         - "8080:8080"
+       environment:
+         # ClickHouse Connection Settings
+         - CLICKHOUSE_HOST=your-clickhouse-host
+         - CLICKHOUSE_PORT=9000
+         - CLICKHOUSE_USER=default
+         - CLICKHOUSE_PASSWORD=your-password
+         - CLICKHOUSE_DATABASE=default
+         
+         # ClickHouse TLS Settings (optional)
+         - CLICKHOUSE_SECURE=false
+         - CLICKHOUSE_SKIP_VERIFY=false
+         
+         # Web Interface Settings
+         - SERVER_ADDR=:8080
+         - GIN_MODE=release
+   ```
+
+3. **Configure Environment Variables**:
+   - Update the environment variables with your actual ClickHouse connection details
+   - For security, consider using Portainer's environment variable management or secrets
+
+4. **Deploy the Stack**:
+   - Click "Deploy the stack"
+   - Wait for the deployment to complete
+
+5. **Access the Application**:
+   - Navigate to `http://your-server-ip:8080`
+   - Or use your domain if you have a reverse proxy configured
+
+#### Advanced Portainer Configuration
+
+For production deployments, consider this enhanced stack configuration:
+
+```yaml
+version: '3.8'
+
+services:
+  clickhouse-schemaflow-visualizer:
+    image: ghcr.io/fulgerx2007/clickhouse-schemaflow-visualizer:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # ClickHouse Connection Settings
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-localhost}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-default}
+      
+      # ClickHouse TLS Settings
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - CLICKHOUSE_SKIP_VERIFY=${CLICKHOUSE_SKIP_VERIFY:-false}
+      
+      # Web Interface Settings
+      - SERVER_ADDR=:8080
+      - GIN_MODE=release
+    deploy:
+      restart_policy:
+        condition: unless-stopped
+      replicas: 1
+      labels:
+        # Traefik labels (if using Traefik as reverse proxy)
+        - "traefik.enable=true"
+        - "traefik.http.routers.clickhouse-viz.rule=Host(`clickhouse-viz.yourdomain.com`)"
+        - "traefik.http.routers.clickhouse-viz.tls=true"
+        - "traefik.http.routers.clickhouse-viz.tls.certresolver=letsencrypt"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+#### Environment Variables for Portainer
+
+When deploying through Portainer, you can set these environment variables in the stack's environment section:
+
+- `CLICKHOUSE_HOST`: Your ClickHouse server hostname or IP
+- `CLICKHOUSE_PORT`: ClickHouse port (default: 9000)
+- `CLICKHOUSE_USER`: Database username (default: default)
+- `CLICKHOUSE_PASSWORD`: Database password
+- `CLICKHOUSE_DATABASE`: Default database to connect to
+- `CLICKHOUSE_SECURE`: Enable TLS connection (true/false)
+- `CLICKHOUSE_SKIP_VERIFY`: Skip TLS certificate verification (true/false)
 
 ### Manual Setup
 
