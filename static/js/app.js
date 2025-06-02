@@ -237,6 +237,9 @@ async function selectTable(tableItem) {
 
     currentSelection.textContent = `${selectedDatabase} / ${selectedTable}`;
 
+    // Reset zoom level when selecting a new table
+    currentZoomLevel = 1;
+
     await loadTableSchema();
     await loadTableDetails(selectedDatabase, selectedTable);
 }
