@@ -94,7 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Restore table details visibility state from localStorage
         const savedTableDetailsState = localStorage.getItem('tableDetailsVisible');
-        const isVisible = savedTableDetailsState !== 'false'; // Default to visible
+        const isVisible = savedTableDetailsState === 'true'; // Default to collapsed
         if (!isVisible) {
             tableDetailsContainer.classList.add('collapsed');
         }
