@@ -281,6 +281,50 @@ main {
     user-select: none;
     cursor: grab;
     border-right: 1px solid #ddd;
+    min-width: 0; /* Prevent flex item from overflowing */
+}
+
+/* When table details is collapsed, expand schema container */
+.content-area:has(.table-details-container.collapsed) .schema-container {
+    flex: 1;
+    border-right: none;
+    max-width: calc(100% - 60px); /* Account for collapsed table details width */
+}
+
+/* Ensure mermaid diagram is centered and fully visible */
+#schema-diagram {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    box-sizing: border-box;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 20px;
+}
+
+/* Inner wrapper for zoom transforms - only affects mermaid content */
+#schema-diagram .mermaid-zoom-wrapper {
+    transform-origin: center center;
+    transition: transform 0.2s ease;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-width: min-content;
+}
+
+#schema-diagram .mermaid {
+    overflow: visible;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-width: min-content;
+}
+
+#schema-diagram svg {
+    height: auto;
+    display: block;
+    margin: 0 auto;
 }
 
 .view-controls {

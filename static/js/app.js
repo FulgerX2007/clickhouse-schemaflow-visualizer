@@ -306,10 +306,16 @@ function renderSchema() {
 function renderMermaidDiagram(schema) {
     schemaDiagram.innerHTML = '';
 
+    // Create wrapper for zoom transforms
+    const zoomWrapper = document.createElement('div');
+    zoomWrapper.className = 'mermaid-zoom-wrapper';
+    
     const container = document.createElement('div');
     container.className = 'mermaid';
     container.textContent = schema;
-    schemaDiagram.appendChild(container);
+    
+    zoomWrapper.appendChild(container);
+    schemaDiagram.appendChild(zoomWrapper);
 
     console.log("Rendering Mermaid diagram with schema:", schema);
 
@@ -657,17 +663,10 @@ function resetZoom() {
 }
 
 function applyZoom() {
-    if (schemaDiagram) {
-        schemaDiagram.style.transform = `scale(${currentZoomLevel})`;
-        
-        const schemaContainer = document.querySelector('.schema-container');
-        if (schemaContainer) {
-            if (currentZoomLevel > 1) {
-                schemaContainer.style.overflow = 'auto';
-            } else {
-                schemaContainer.style.overflow = 'auto';
-            }
-        }
+    const zoomWrapper = document.querySelector('.mermaid-zoom-wrapper');
+    if (zoomWrapper) {
+        zoomWrapper.style.transform = `scale(${currentZoomLevel})`;
+        console.log(`Applied zoom ${currentZoomLevel} to mermaid content only`);
     }
 }
 
@@ -685,12 +684,18 @@ function setupMouseWheelZoom() {
     schemaContainer.style.cursor = 'grab';
     
     schemaContainer.addEventListener('mousedown', (e) => {
+        // Only start dragging if we're not clicking on zoom controls
+        if (e.target.closest('.view-controls')) return;
+        
         isDragging = true;
         schemaContainer.style.cursor = 'grabbing';
         startX = e.pageX - schemaContainer.offsetLeft;
         startY = e.pageY - schemaContainer.offsetTop;
         scrollLeft = schemaContainer.scrollLeft;
         scrollTop = schemaContainer.scrollTop;
+        
+        // Prevent text selection while dragging
+        e.preventDefault();
     });
     
     schemaContainer.addEventListener('mouseleave', () => {
@@ -707,14 +712,15 @@ function setupMouseWheelZoom() {
         if (!isDragging) return;
         
         e.preventDefault();
+        
         const x = e.pageX - schemaContainer.offsetLeft;
         const y = e.pageY - schemaContainer.offsetTop;
         
-        const moveX = (x - startX);
-        const moveY = (y - startY);
+        const walkX = (x - startX) * 1; // Scroll speed multiplier
+        const walkY = (y - startY) * 1;
         
-        schemaContainer.scrollLeft = scrollLeft - moveX;
-        schemaContainer.scrollTop = scrollTop - moveY;
+        schemaContainer.scrollLeft = scrollLeft - walkX;
+        schemaContainer.scrollTop = scrollTop - walkY;
     });
     
     console.log("Mouse wheel zoom and drag support set up");
