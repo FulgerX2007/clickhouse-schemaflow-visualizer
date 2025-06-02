@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <zookeeper>
+        <node>
+            <host>zookeeper</host>
+            <port>2181</port>
+        </node>
+    </zookeeper>
+
+    <macros>
+        <cluster>test_cluster</cluster>
+        <shard>01</shard>
+        <replica>replica_01</replica>
+    </macros>
+
+    <remote_servers>
+        <test_cluster>
+            <shard>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster>
+    </remote_servers>
+</clickhouse>
