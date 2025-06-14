@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-test
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # Native client
+      - "9009:9009"   # Interserver communication
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse-test.xml:/etc/clickhouse-server/config.d/test.xml:ro
+      - ./scripts/clickhouse_init.sql:/scripts/clickhouse_init.sql:ro
+      - ./scripts/init_clickhouse.sh:/docker-entrypoint-initdb.d/init_clickhouse.sh:ro
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+volumes:
+  clickhouse_data:

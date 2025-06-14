@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<yandex>
+    <remote_servers>
+        <test_cluster>
+            <shard>
+                <replica>
+                    <host>clickhouse-test</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster>
+    </remote_servers>
+</yandex>
