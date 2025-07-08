@@ -25,6 +25,7 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	{
 		api.GET("/databases", h.GetDatabases)
 		api.GET("/schema/:database/:table", h.GetTableSchema)
+		api.GET("/relationships/:database/:table", h.GetTableRelationships)
 		api.GET("/table/:database/:table", h.GetTableDetails)
 	}
 }
@@ -59,6 +60,25 @@ func (h *Handler) GetTableSchema(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"schema": schema})
+}
+
+// GetTableRelationships returns a detailed ER diagram schema for the selected table
+func (h *Handler) GetTableRelationships(c *gin.Context) {
+	database := c.Param("database")
+	table := c.Param("table")
+
+	if database == "" || table == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+		return
+	}
+
+	schema, err := h.clickhouse.GenerateRelationshipsSchema(database, table)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

@@ -368,6 +368,284 @@ func (c *ClickHouseClient) GenerateMermaidSchema(dbName, tableName string) (stri
 	return sb.String(), nil
 }
 
+// GenerateRelationshipsSchema generates a detailed ER diagram schema for a table showing column-level relationships
+func (c *ClickHouseClient) GenerateRelationshipsSchema(dbName, tableName string) (string, error) {
+	// Get table details including columns
+	tableDetails, err := c.GetTableColumns(dbName, tableName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get table details: %v", err)
+	}
+
+	// Get table relations
+	tablesRelations, err := c.getTablesRelations()
+	if err != nil {
+		return "", fmt.Errorf("failed to get table relations: %v", err)
+	}
+
+	// Start building the ER diagram with left-to-right layout
+	var sb strings.Builder
+	sb.WriteString("%%{init: {'er': {'layoutDirection': 'LR'}}}%%\n")
+	sb.WriteString("erDiagram\n")
+
+	// Generate the main table entity
+	mainTableName := c.sanitizeTableName(tableName)
+	sb.WriteString(fmt.Sprintf("    %s {\n", mainTableName))
+	for _, column := range tableDetails.Columns {
+		// Format column with type - use proper Mermaid ER syntax
+		columnType := c.simplifyColumnType(column.Type)
+		sb.WriteString(fmt.Sprintf("        %s %s\n", columnType, column.Name))
+	}
+	sb.WriteString("    }\n\n")
+
+	// Find related tables and generate their entities with column relationships
+	relatedTables := c.findRelatedTables(dbName+"."+tableName, tablesRelations)
+	allTableColumns := make(map[string][]ColumnInfo)
+	allTableColumns[mainTableName] = tableDetails.Columns
+
+	for _, relatedTable := range relatedTables {
+		parts := strings.Split(relatedTable, ".")
+		if len(parts) == 2 {
+			relatedDbName, relatedTableName := parts[0], parts[1]
+
+			// Get related table details
+			relatedDetails, err := c.GetTableColumns(relatedDbName, relatedTableName)
+			if err != nil {
+				log.Printf("Warning: Could not get details for related table %s: %v", relatedTable, err)
+				continue
+			}
+
+			sanitizedRelatedName := c.sanitizeTableName(relatedTableName)
+			allTableColumns[sanitizedRelatedName] = relatedDetails.Columns
+
+			// Generate related table entity
+			sb.WriteString(fmt.Sprintf("    %s {\n", sanitizedRelatedName))
+			for _, column := range relatedDetails.Columns {
+				columnType := c.simplifyColumnType(column.Type)
+				sb.WriteString(fmt.Sprintf("        %s %s\n", columnType, column.Name))
+			}
+			sb.WriteString("    }\n\n")
+		}
+	}
+
+	// Generate column-level relationships
+	c.generateColumnRelationships(&sb, mainTableName, allTableColumns, tablesRelations)
+
+	return sb.String(), nil
+}
+
+// Helper function to sanitize table names for ER diagrams
+func (c *ClickHouseClient) sanitizeTableName(tableName string) string {
+	// Remove special characters and replace with underscores
+	sanitized := strings.ReplaceAll(tableName, ".", "_")
+	sanitized = strings.ReplaceAll(sanitized, "-", "_")
+	return sanitized
+}
+
+// Helper function to simplify column types for ER diagrams
+func (c *ClickHouseClient) simplifyColumnType(columnType string) string {
+	// Simplify complex ClickHouse types for better readability
+	switch {
+	case strings.Contains(columnType, "String"):
+		return "string"
+	case strings.Contains(columnType, "Int"):
+		return "int"
+	case strings.Contains(columnType, "UInt"):
+		return "uint"
+	case strings.Contains(columnType, "Float"):
+		return "float"
+	case strings.Contains(columnType, "Date"):
+		return "date"
+	case strings.Contains(columnType, "DateTime"):
+		return "datetime"
+	case strings.Contains(columnType, "UUID"):
+		return "uuid"
+	case strings.Contains(columnType, "Array"):
+		return "array"
+	case strings.Contains(columnType, "Nullable"):
+		// Extract the inner type
+		inner := strings.TrimPrefix(columnType, "Nullable(")
+		inner = strings.TrimSuffix(inner, ")")
+		return c.simplifyColumnType(inner)
+	default:
+		return "other"
+	}
+}
+
+// Helper function to find related tables
+func (c *ClickHouseClient) findRelatedTables(table string, relations []TableRelation) []string {
+	var relatedTables []string
+	seen := make(map[string]bool)
+
+	for _, rel := range relations {
+		if rel.Table == table && rel.DependsOnTable != "" && !seen[rel.DependsOnTable] {
+			relatedTables = append(relatedTables, rel.DependsOnTable)
+			seen[rel.DependsOnTable] = true
+		}
+		if rel.DependsOnTable == table && rel.Table != "" && !seen[rel.Table] {
+			relatedTables = append(relatedTables, rel.Table)
+			seen[rel.Table] = true
+		}
+	}
+
+	return relatedTables
+}
+
+// Helper function to generate ER relationships
+func (c *ClickHouseClient) generateERRelationships(sb *strings.Builder, table string, relations []TableRelation) {
+	for _, rel := range relations {
+		if rel.Table == table && rel.DependsOnTable != "" {
+			// This table depends on another table
+			sourceParts := strings.Split(rel.DependsOnTable, ".")
+			targetParts := strings.Split(rel.Table, ".")
+
+			if len(sourceParts) == 2 && len(targetParts) == 2 {
+				sourceTable := c.sanitizeTableName(sourceParts[1])
+				targetTable := c.sanitizeTableName(targetParts[1])
+
+				// Determine relationship type based on engine
+				relationshipType := c.getRelationshipType(rel)
+				sb.WriteString(fmt.Sprintf("    %s %s %s : \"%s\"\n",
+					sourceTable, relationshipType, targetTable, c.getRelationshipLabel(rel)))
+			}
+		}
+	}
+}
+
+// Helper function to determine relationship type
+func (c *ClickHouseClient) getRelationshipType(rel TableRelation) string {
+	// Based on ClickHouse table types, determine the relationship
+	if strings.Contains(rel.Icon, "fa-eye") { // Materialized View
+		return "||--o{"
+	} else if strings.Contains(rel.Icon, "fa-diagram-project") { // Distributed
+		return "||--||"
+	} else if strings.Contains(rel.Icon, "fa-book") { // Dictionary
+		return "}o--||"
+	}
+	return "||--||" // Default relationship
+}
+
+// Helper function to get relationship label
+func (c *ClickHouseClient) getRelationshipLabel(rel TableRelation) string {
+	if strings.Contains(rel.Icon, "fa-eye") {
+		return "materializes"
+	} else if strings.Contains(rel.Icon, "fa-diagram-project") {
+		return "distributes"
+	} else if strings.Contains(rel.Icon, "fa-book") {
+		return "references"
+	}
+	return "relates_to"
+}
+
+// Helper function to get column key indicators for ER diagrams
+func (c *ClickHouseClient) getColumnKeyIndicator(columnName, columnType string) string {
+	columnNameLower := strings.ToLower(columnName)
+
+	// Check for primary key patterns
+	if columnNameLower == "id" || strings.HasSuffix(columnNameLower, "_id") {
+		return "PK"
+	}
+
+	// Check for foreign key patterns
+	if strings.HasSuffix(columnNameLower, "_id") && columnNameLower != "id" {
+		return "FK"
+	}
+
+	// Check for UUID types (often used as keys in ClickHouse)
+	if strings.Contains(columnType, "UUID") {
+		return "UK"
+	}
+
+	// Check for timestamp columns (often used for partitioning)
+	if strings.Contains(columnType, "DateTime") && (strings.Contains(columnNameLower, "time") || strings.Contains(columnNameLower, "date")) {
+		return "TS"
+	}
+
+	return ""
+}
+
+// Helper function to generate column-level relationships
+func (c *ClickHouseClient) generateColumnRelationships(sb *strings.Builder, mainTableName string, allTableColumns map[string][]ColumnInfo, relations []TableRelation) {
+	// Find column relationships based on naming patterns and types
+	mainColumns := allTableColumns[mainTableName]
+
+	for relatedTableName, relatedColumns := range allTableColumns {
+		if relatedTableName == mainTableName {
+			continue
+		}
+
+		// Look for column relationships between tables
+		for _, mainCol := range mainColumns {
+			for _, relatedCol := range relatedColumns {
+				if c.areColumnsRelated(mainCol, relatedCol) {
+					// Generate relationship line between specific columns
+					sb.WriteString(fmt.Sprintf("    %s ||--|| %s : \"%s.%s -> %s.%s\"\n",
+						mainTableName, relatedTableName, mainTableName, mainCol.Name, relatedTableName, relatedCol.Name))
+				}
+			}
+		}
+	}
+}
+
+// Helper function to determine if two columns are related
+func (c *ClickHouseClient) areColumnsRelated(col1, col2 ColumnInfo) bool {
+	col1NameLower := strings.ToLower(col1.Name)
+	col2NameLower := strings.ToLower(col2.Name)
+
+	// Exact name match
+	if col1NameLower == col2NameLower {
+		return true
+	}
+
+	// Foreign key pattern: table_id matches id
+	if strings.HasSuffix(col1NameLower, "_id") && col2NameLower == "id" {
+		return true
+	}
+	if strings.HasSuffix(col2NameLower, "_id") && col1NameLower == "id" {
+		return true
+	}
+
+	// UUID relationships
+	if strings.Contains(col1.Type, "UUID") && strings.Contains(col2.Type, "UUID") {
+		// Check if column names suggest a relationship
+		if strings.Contains(col1NameLower, strings.TrimSuffix(col2NameLower, "_id")) ||
+			strings.Contains(col2NameLower, strings.TrimSuffix(col1NameLower, "_id")) {
+			return true
+		}
+	}
+
+	// Timestamp relationships (common in ClickHouse for partitioning)
+	if strings.Contains(col1.Type, "DateTime") && strings.Contains(col2.Type, "DateTime") {
+		if (strings.Contains(col1NameLower, "time") || strings.Contains(col1NameLower, "date")) &&
+			(strings.Contains(col2NameLower, "time") || strings.Contains(col2NameLower, "date")) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Helper function to get column relationship type
+func (c *ClickHouseClient) getColumnRelationshipType(col1, col2 ColumnInfo) string {
+	col1NameLower := strings.ToLower(col1.Name)
+	col2NameLower := strings.ToLower(col2.Name)
+
+	// Primary key to foreign key relationship
+	if col1NameLower == "id" && strings.HasSuffix(col2NameLower, "_id") {
+		return "||--o{"
+	}
+	if col2NameLower == "id" && strings.HasSuffix(col1NameLower, "_id") {
+		return "}o--||"
+	}
+
+	// UUID relationships (one-to-one)
+	if strings.Contains(col1.Type, "UUID") && strings.Contains(col2.Type, "UUID") {
+		return "||--||"
+	}
+
+	// Default many-to-many
+	return "||--||"
+}
+
 func (c *ClickHouseClient) generateTableNodeContent(table string) string {
 	if metadata, exists := TableMetadata[table]; exists && metadata.TotalRows != nil {
 		return fmt.Sprintf(

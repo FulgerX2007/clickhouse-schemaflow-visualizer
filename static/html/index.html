@@ -51,13 +51,41 @@
                     </div>
                 </div>
                 <div class="content-area">
-                    <div class="schema-container">
-                        <div class="view-controls">
-                            <button id="zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
-                            <button id="zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
-                            <button id="reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                    <div class="schema-sections">
+                        <div class="section-tabs">
+                            <button class="section-tab active" data-section="data-flow">
+                                <i class="fa-solid fa-flow"></i> Data Flow
+                            </button>
+                            <button class="section-tab" data-section="relationships">
+                                <i class="fa-solid fa-project-diagram"></i> Relationships
+                            </button>
                         </div>
-                        <pre id="schema-diagram"></pre>
+                        
+                        <div class="schema-container" id="data-flow-section">
+                            <div class="section-header">
+                                <h3><i class="fa-solid fa-flow"></i> Data Flow</h3>
+                                <p class="section-description">High-level table dependencies and data flow relationships</p>
+                            </div>
+                            <div class="view-controls">
+                                <button id="dataflow-zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
+                                <button id="dataflow-zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
+                                <button id="dataflow-reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                            </div>
+                            <pre id="dataflow-diagram"></pre>
+                        </div>
+                        
+                        <div class="schema-container hidden" id="relationships-section">
+                            <div class="section-header">
+                                <h3><i class="fa-solid fa-project-diagram"></i> Relationships</h3>
+                                <p class="section-description">Detailed column-level relationships and table structures</p>
+                            </div>
+                            <div class="view-controls">
+                                <button id="relationships-zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
+                                <button id="relationships-zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
+                                <button id="relationships-reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                            </div>
+                            <pre id="relationships-diagram"></pre>
+                        </div>
                     </div>
                     <div class="table-details-container">
                         <div class="table-details-header">

@@ -1,11 +1,25 @@
 const databaseTree = document.getElementById('database-tree');
 const refreshBtn = document.getElementById('refresh-btn');
 const currentSelection = document.getElementById('current-selection');
-const schemaDiagram = document.getElementById('schema-diagram');
+const dataflowDiagram = document.getElementById('dataflow-diagram');
+const relationshipsDiagram = document.getElementById('relationships-diagram');
 const exportHtmlBtn = document.getElementById('export-html-btn');
-const zoomInBtn = document.getElementById('zoom-in-btn');
-const zoomOutBtn = document.getElementById('zoom-out-btn');
-const resetZoomBtn = document.getElementById('reset-zoom-btn');
+
+// Data Flow controls
+const dataflowZoomInBtn = document.getElementById('dataflow-zoom-in-btn');
+const dataflowZoomOutBtn = document.getElementById('dataflow-zoom-out-btn');
+const dataflowResetZoomBtn = document.getElementById('dataflow-reset-zoom-btn');
+
+// Relationships controls
+const relationshipsZoomInBtn = document.getElementById('relationships-zoom-in-btn');
+const relationshipsZoomOutBtn = document.getElementById('relationships-zoom-out-btn');
+const relationshipsResetZoomBtn = document.getElementById('relationships-reset-zoom-btn');
+
+// Section management
+const sectionTabs = document.querySelectorAll('.section-tab');
+const dataFlowSection = document.getElementById('data-flow-section');
+const relationshipsSection = document.getElementById('relationships-section');
+
 const tableDetailsContainer = document.querySelector('.table-details-container');
 const tableDetailsContent = document.getElementById('table-details');
 const toggleTableDetailsBtn = document.getElementById('toggle-table-details');
@@ -13,8 +27,11 @@ const toggleTableDetailsBtn = document.getElementById('toggle-table-details');
 let databases = [];
 let selectedDatabase = null;
 let selectedTable = null;
-let currentSchema = null;
-let currentZoomLevel = 1; // Default zoom level
+let currentDataFlowSchema = null;
+let currentRelationshipsSchema = null;
+let currentActiveSection = 'data-flow';
+let dataflowZoomLevel = 1;
+let relationshipsZoomLevel = 1;
 
 document.addEventListener('DOMContentLoaded', () => {
     mermaid.initialize({
@@ -34,9 +51,20 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshBtn.addEventListener('click', loadDatabases);
     exportHtmlBtn.addEventListener('click', exportHtml);
     
-    zoomInBtn.addEventListener('click', zoomIn);
-    zoomOutBtn.addEventListener('click', zoomOut);
-    resetZoomBtn.addEventListener('click', resetZoom);
+    // Data Flow zoom controls
+    dataflowZoomInBtn.addEventListener('click', () => dataflowZoomIn());
+    dataflowZoomOutBtn.addEventListener('click', () => dataflowZoomOut());
+    dataflowResetZoomBtn.addEventListener('click', () => dataflowResetZoom());
+    
+    // Relationships zoom controls
+    relationshipsZoomInBtn.addEventListener('click', () => relationshipsZoomIn());
+    relationshipsZoomOutBtn.addEventListener('click', () => relationshipsZoomOut());
+    relationshipsResetZoomBtn.addEventListener('click', () => relationshipsResetZoom());
+    
+    // Section tab switching
+    sectionTabs.forEach(tab => {
+        tab.addEventListener('click', () => switchSection(tab.dataset.section));
+    });
     
     // Setup collapsible Database header section
     const databaseHeader = document.getElementById('database-header');
@@ -235,12 +263,13 @@ async function selectTable(tableItem) {
     selectedDatabase = tableItem.dataset.database;
     selectedTable = tableItem.dataset.table;
 
-    // Reset zoom level when selecting a new table
-    currentZoomLevel = 1;
+    // Reset zoom levels when selecting a new table
+    dataflowZoomLevel = 1;
+    relationshipsZoomLevel = 1;
 
     currentSelection.textContent = `${selectedDatabase} / ${selectedTable}`;
 
-    await loadTableSchema();
+    await loadTableSchemas();
     await loadTableDetails(selectedDatabase, selectedTable);
 }
 
@@ -859,4 +888,271 @@ function showNoTableSelected() {
 
 function showError(message) {
     alert(message);
+}
+
+// Section switching functionality
+function switchSection(sectionName) {
+    // Update active tab
+    sectionTabs.forEach(tab => {
+        tab.classList.remove('active');
+        if (tab.dataset.section === sectionName) {
+            tab.classList.add('active');
+        }
+    });
+    
+    // Show/hide sections
+    if (sectionName === 'data-flow') {
+        dataFlowSection.classList.remove('hidden');
+        relationshipsSection.classList.add('hidden');
+        currentActiveSection = 'data-flow';
+    } else if (sectionName === 'relationships') {
+        dataFlowSection.classList.add('hidden');
+        relationshipsSection.classList.remove('hidden');
+        currentActiveSection = 'relationships';
+    }
+    
+    // Save active section to localStorage
+    localStorage.setItem('activeSection', sectionName);
+}
+
+// Load schemas for both sections
+async function loadTableSchemas() {
+    if (!selectedDatabase || !selectedTable) return;
+
+    try {
+        // Load Data Flow schema (existing endpoint)
+        const dataFlowResponse = await fetch(`/api/schema/${selectedDatabase}/${selectedTable}`);
+        if (!dataFlowResponse.ok) {
+            throw new Error(`HTTP error! status: ${dataFlowResponse.status}`);
+        }
+        const dataFlowData = await dataFlowResponse.json();
+        currentDataFlowSchema = dataFlowData.schema;
+
+        // Load Relationships schema (new endpoint)
+        const relationshipsResponse = await fetch(`/api/relationships/${selectedDatabase}/${selectedTable}`);
+        if (!relationshipsResponse.ok) {
+            throw new Error(`HTTP error! status: ${relationshipsResponse.status}`);
+        }
+        const relationshipsData = await relationshipsResponse.json();
+        currentRelationshipsSchema = relationshipsData.schema;
+
+        // Render both schemas
+        renderDataFlowSchema();
+        renderRelationshipsSchema();
+    } catch (error) {
+        console.error('Error loading table schemas:', error);
+        showError('Failed to load table schemas.');
+    }
+}
+
+// Generate relationships schema (enhanced version of data flow)
+function generateRelationshipsSchema(dataFlowSchema) {
+    // For now, convert flowchart to ER diagram
+    // This is a placeholder - we'll enhance this with proper ER diagram generation
+    if (!dataFlowSchema) return '';
+    
+    // Convert flowchart to erDiagram
+    let relationshipsSchema = dataFlowSchema.replace('flowchart TB', 'erDiagram');
+    
+    // Basic conversion - this will be enhanced later with proper ER syntax
+    return relationshipsSchema;
+}
+
+// Render Data Flow schema
+function renderDataFlowSchema() {
+    if (!currentDataFlowSchema) return;
+
+    const formattedSchema = formatMermaidSchema(currentDataFlowSchema);
+    renderMermaidDiagramInContainer(dataflowDiagram, formattedSchema, 'dataflow');
+}
+
+// Render Relationships schema
+function renderRelationshipsSchema() {
+    if (!currentRelationshipsSchema) return;
+
+    const formattedSchema = formatMermaidSchema(currentRelationshipsSchema);
+    renderMermaidDiagramInContainer(relationshipsDiagram, formattedSchema, 'relationships');
+}
+
+// Enhanced mermaid diagram renderer for specific containers
+function renderMermaidDiagramInContainer(container, schema, type) {
+    if (!container || !schema) return;
+
+    container.innerHTML = '';
+
+    const mermaidContainer = document.createElement('div');
+    mermaidContainer.className = 'mermaid';
+    mermaidContainer.textContent = schema;
+    container.appendChild(mermaidContainer);
+
+    console.log(`Rendering ${type} Mermaid diagram with schema:`, schema);
+
+    try {
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'default',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true
+            },
+            er: {
+                diagramPadding: 20,
+                layoutDirection: 'TB',
+                minEntityWidth: 100,
+                minEntityHeight: 75,
+                entityPadding: 15
+            }
+        });
+
+        mermaid.init(undefined, mermaidContainer);
+        console.log(`${type} Mermaid initialization successful`);
+        
+        // Apply zoom based on section type
+        if (type === 'dataflow') {
+            applyDataFlowZoom();
+            setupMouseWheelZoomForSection(dataFlowSection, 'dataflow');
+        } else if (type === 'relationships') {
+            applyRelationshipsZoom();
+            setupMouseWheelZoomForSection(relationshipsSection, 'relationships');
+        }
+    } catch (error) {
+        console.error(`Error during ${type} Mermaid initialization:`, error);
+        showRawSchemaInContainer(container, schema);
+    }
+}
+
+// Show raw schema in specific container
+function showRawSchemaInContainer(container, schema) {
+    container.innerHTML = '';
+    const rawSchemaDisplay = document.createElement('pre');
+    rawSchemaDisplay.style.whiteSpace = 'pre-wrap';
+    rawSchemaDisplay.style.fontFamily = 'monospace';
+    rawSchemaDisplay.style.padding = '10px';
+    rawSchemaDisplay.style.border = '1px solid #ccc';
+    rawSchemaDisplay.textContent = schema;
+    container.appendChild(rawSchemaDisplay);
+}
+
+// Data Flow zoom functions
+function dataflowZoomIn() {
+    dataflowZoomLevel = Math.min(dataflowZoomLevel + 0.1, 20);
+    applyDataFlowZoom();
+}
+
+function dataflowZoomOut() {
+    dataflowZoomLevel = Math.max(dataflowZoomLevel - 0.1, 0.5);
+    applyDataFlowZoom();
+}
+
+function dataflowResetZoom() {
+    dataflowZoomLevel = 1;
+    applyDataFlowZoom();
+}
+
+function applyDataFlowZoom() {
+    if (dataflowDiagram) {
+        dataflowDiagram.style.transform = `scale(${dataflowZoomLevel})`;
+        dataflowDiagram.style.transformOrigin = 'center center';
+    }
+}
+
+// Relationships zoom functions
+function relationshipsZoomIn() {
+    relationshipsZoomLevel = Math.min(relationshipsZoomLevel + 0.1, 20);
+    applyRelationshipsZoom();
+}
+
+function relationshipsZoomOut() {
+    relationshipsZoomLevel = Math.max(relationshipsZoomLevel - 0.1, 0.5);
+    applyRelationshipsZoom();
+}
+
+function relationshipsResetZoom() {
+    relationshipsZoomLevel = 1;
+    applyRelationshipsZoom();
+}
+
+function applyRelationshipsZoom() {
+    if (relationshipsDiagram) {
+        relationshipsDiagram.style.transform = `scale(${relationshipsZoomLevel})`;
+        relationshipsDiagram.style.transformOrigin = 'center center';
+    }
+}
+
+// Setup mouse wheel zoom for specific section
+function setupMouseWheelZoomForSection(sectionContainer, sectionType) {
+    if (!sectionContainer) return;
+    
+    const diagramContainer = sectionType === 'dataflow' ? dataflowDiagram : relationshipsDiagram;
+    
+    sectionContainer.removeEventListener('wheel', handleMouseWheelForSection);
+    sectionContainer.addEventListener('wheel', (event) => handleMouseWheelForSection(event, sectionType), { passive: false });
+    
+    // Setup mouse drag scrolling
+    let isDragging = false;
+    let startX, startY, scrollLeft, scrollTop;
+    
+    sectionContainer.style.cursor = 'grab';
+    
+    sectionContainer.addEventListener('mousedown', (e) => {
+        // Don't drag if clicking on zoom controls
+        if (e.target.closest('.view-controls')) return;
+        
+        isDragging = true;
+        sectionContainer.style.cursor = 'grabbing';
+        startX = e.pageX - sectionContainer.offsetLeft;
+        startY = e.pageY - sectionContainer.offsetTop;
+        scrollLeft = sectionContainer.scrollLeft;
+        scrollTop = sectionContainer.scrollTop;
+        e.preventDefault();
+    });
+    
+    sectionContainer.addEventListener('mouseleave', () => {
+        isDragging = false;
+        sectionContainer.style.cursor = 'grab';
+    });
+    
+    sectionContainer.addEventListener('mouseup', () => {
+        isDragging = false;
+        sectionContainer.style.cursor = 'grab';
+    });
+    
+    sectionContainer.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        
+        e.preventDefault();
+        const x = e.pageX - sectionContainer.offsetLeft;
+        const y = e.pageY - sectionContainer.offsetTop;
+        
+        const moveX = (x - startX);
+        const moveY = (y - startY);
+        
+        sectionContainer.scrollLeft = scrollLeft - moveX;
+        sectionContainer.scrollTop = scrollTop - moveY;
+    });
+    
+    console.log(`Mouse wheel zoom and drag support set up for ${sectionType}`);
+}
+
+function handleMouseWheelForSection(event, sectionType) {
+    event.preventDefault();
+    
+    const delta = event.deltaY || event.detail || event.wheelDelta;
+    
+    if (sectionType === 'dataflow') {
+        if (delta < 0) {
+            dataflowZoomIn();
+        } else {
+            dataflowZoomOut();
+        }
+        console.log(`Data Flow zoom level: ${dataflowZoomLevel.toFixed(1)}`);
+    } else if (sectionType === 'relationships') {
+        if (delta < 0) {
+            relationshipsZoomIn();
+        } else {
+            relationshipsZoomOut();
+        }
+        console.log(`Relationships zoom level: ${relationshipsZoomLevel.toFixed(1)}`);
+    }
 }
