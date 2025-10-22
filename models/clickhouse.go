@@ -911,6 +911,18 @@ func (c *ClickHouseClient) extractBaseColumnName(expression string, sourceColumn
 	return ""
 }
 
+// sanitizeMermaidLabel sanitizes text for use in Mermaid arrow labels
+func (c *ClickHouseClient) sanitizeMermaidLabel(text string) string {
+	// Replace problematic characters for Mermaid labels
+	// Parentheses, quotes, and pipes need special handling
+	text = strings.ReplaceAll(text, "(", "#40;")
+	text = strings.ReplaceAll(text, ")", "#41;")
+	text = strings.ReplaceAll(text, "|", "#124;")
+	text = strings.ReplaceAll(text, "\"", "#34;")
+	text = strings.ReplaceAll(text, "'", "#39;")
+	return text
+}
+
 // isDistributedTable checks if a table is a Distributed table
 func (c *ClickHouseClient) isDistributedTable(dbName, tableName string) bool {
 	ctx := context.Background()
@@ -1049,7 +1061,9 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 
 								// Add transformation label if present
 								if mapping.Transformation != "" {
-									sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, mapping.Transformation, mvNodeID))
+									// Sanitize transformation for Mermaid (escape special characters)
+									safeTransformation := c.sanitizeMermaidLabel(mapping.Transformation)
+									sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, safeTransformation, mvNodeID))
 								} else {
 									sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
 								}
@@ -1104,7 +1118,9 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 
 						// Add transformation label if present
 						if mapping.Transformation != "" {
-							sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, mapping.Transformation, mvNodeID))
+							// Sanitize transformation for Mermaid (escape special characters)
+							safeTransformation := c.sanitizeMermaidLabel(mapping.Transformation)
+							sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, safeTransformation, mvNodeID))
 						} else {
 							sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
 						}
