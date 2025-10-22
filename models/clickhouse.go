@@ -64,6 +64,22 @@ type TableDetails struct {
 	Columns    []ColumnInfo `json:"columns"`
 }
 
+// ColumnRelationship represents a column-to-column mapping
+type ColumnRelationship struct {
+	SourceTable  string
+	SourceColumn string
+	TargetTable  string
+	TargetColumn string
+}
+
+// FlowchartNode represents a column node in the flowchart
+type FlowchartNode struct {
+	TableName  string
+	ColumnName string
+	ColumnType string
+	NodeID     string
+}
+
 // ClickHouseClient represents a client for interacting with ClickHouse
 type ClickHouseClient struct {
 	conn clickhouse.Conn
@@ -368,69 +384,10 @@ func (c *ClickHouseClient) GenerateMermaidSchema(dbName, tableName string) (stri
 	return sb.String(), nil
 }
 
-// GenerateRelationshipsSchema generates a detailed ER diagram schema for a table showing column-level relationships
+// GenerateRelationshipsSchema generates a detailed flowchart schema for a table showing column-level relationships
 func (c *ClickHouseClient) GenerateRelationshipsSchema(dbName, tableName string) (string, error) {
-	// Get table details including columns
-	tableDetails, err := c.GetTableColumns(dbName, tableName)
-	if err != nil {
-		return "", fmt.Errorf("failed to get table details: %v", err)
-	}
-
-	// Get table relations
-	tablesRelations, err := c.getTablesRelations()
-	if err != nil {
-		return "", fmt.Errorf("failed to get table relations: %v", err)
-	}
-
-	// Start building the ER diagram with left-to-right layout
-	var sb strings.Builder
-	sb.WriteString("%%{init: {'er': {'layoutDirection': 'LR'}}}%%\n")
-	sb.WriteString("erDiagram\n")
-
-	// Generate the main table entity
-	mainTableName := c.sanitizeTableName(tableName)
-	sb.WriteString(fmt.Sprintf("    %s {\n", mainTableName))
-	for _, column := range tableDetails.Columns {
-		// Format column with type - use proper Mermaid ER syntax
-		columnType := c.simplifyColumnType(column.Type)
-		sb.WriteString(fmt.Sprintf("        %s %s\n", columnType, column.Name))
-	}
-	sb.WriteString("    }\n\n")
-
-	// Find related tables and generate their entities with column relationships
-	relatedTables := c.findRelatedTables(dbName+"."+tableName, tablesRelations)
-	allTableColumns := make(map[string][]ColumnInfo)
-	allTableColumns[mainTableName] = tableDetails.Columns
-
-	for _, relatedTable := range relatedTables {
-		parts := strings.Split(relatedTable, ".")
-		if len(parts) == 2 {
-			relatedDbName, relatedTableName := parts[0], parts[1]
-
-			// Get related table details
-			relatedDetails, err := c.GetTableColumns(relatedDbName, relatedTableName)
-			if err != nil {
-				log.Printf("Warning: Could not get details for related table %s: %v", relatedTable, err)
-				continue
-			}
-
-			sanitizedRelatedName := c.sanitizeTableName(relatedTableName)
-			allTableColumns[sanitizedRelatedName] = relatedDetails.Columns
-
-			// Generate related table entity
-			sb.WriteString(fmt.Sprintf("    %s {\n", sanitizedRelatedName))
-			for _, column := range relatedDetails.Columns {
-				columnType := c.simplifyColumnType(column.Type)
-				sb.WriteString(fmt.Sprintf("        %s %s\n", columnType, column.Name))
-			}
-			sb.WriteString("    }\n\n")
-		}
-	}
-
-	// Generate column-level relationships
-	c.generateColumnRelationships(&sb, mainTableName, allTableColumns, tablesRelations)
-
-	return sb.String(), nil
+	// Use the new flowchart-based approach for column-level visualization
+	return c.buildColumnFlowchart(dbName, tableName)
 }
 
 // Helper function to sanitize table names for ER diagrams
@@ -754,6 +711,412 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 		TotalBytes: totalBytes,
 		Columns:    columns,
 	}, nil
+}
+
+// parseViewQuery extracts the SELECT statement from a CREATE MATERIALIZED VIEW query
+func (c *ClickHouseClient) parseViewQuery(createQuery string) (selectQuery string, sourceTable string, destTable string) {
+	// Extract SELECT query - find everything after "AS SELECT" or just "SELECT"
+	selectIdx := strings.Index(createQuery, "SELECT")
+	if selectIdx == -1 {
+		return "", "", ""
+	}
+	selectQuery = createQuery[selectIdx:]
+
+	// Extract source table from "FROM table_name"
+	fromParts := strings.Split(createQuery, "FROM ")
+	if len(fromParts) > 1 {
+		// Get the part after FROM and extract table name
+		afterFrom := strings.TrimSpace(fromParts[1])
+		// Split by space or other separators to get just the table name
+		sourceTableParts := strings.FieldsFunc(afterFrom, func(r rune) bool {
+			return r == ' ' || r == '\n' || r == '\r' || r == '(' || r == ';'
+		})
+		if len(sourceTableParts) > 0 {
+			sourceTable = sourceTableParts[0]
+		}
+	}
+
+	// Extract destination table from "TO database.table" or "MATERIALIZED VIEW database.table"
+	toParts := strings.Split(createQuery, "TO ")
+	if len(toParts) > 1 {
+		afterTo := strings.TrimSpace(toParts[1])
+		destTableParts := strings.FieldsFunc(afterTo, func(r rune) bool {
+			return r == ' ' || r == '\n' || r == '\r' || r == '('
+		})
+		if len(destTableParts) > 0 {
+			destTable = destTableParts[0]
+		}
+	} else {
+		// Try to get from CREATE MATERIALIZED VIEW line
+		queryParts := strings.Fields(createQuery)
+		for i, part := range queryParts {
+			if part == "VIEW" && i+1 < len(queryParts) {
+				destTable = queryParts[i+1]
+				break
+			}
+		}
+	}
+
+	return selectQuery, sourceTable, destTable
+}
+
+// extractColumnMappings parses a SELECT query to extract column mappings
+func (c *ClickHouseClient) extractColumnMappings(selectQuery string, sourceColumns []ColumnInfo) []ColumnRelationship {
+	var relationships []ColumnRelationship
+
+	// Find the SELECT part and FROM part
+	selectIdx := strings.Index(selectQuery, "SELECT")
+	fromIdx := strings.Index(selectQuery, "FROM")
+
+	if selectIdx == -1 || fromIdx == -1 || fromIdx <= selectIdx {
+		return relationships
+	}
+
+	// Extract just the column list between SELECT and FROM
+	columnsPart := selectQuery[selectIdx+6 : fromIdx]
+	columnsPart = strings.TrimSpace(columnsPart)
+
+	// Split by comma (basic parsing - doesn't handle nested functions perfectly)
+	columnDefs := strings.Split(columnsPart, ",")
+
+	for _, colDef := range columnDefs {
+		colDef = strings.TrimSpace(colDef)
+		if colDef == "" {
+			continue
+		}
+
+		var sourceCol, targetCol string
+
+		// Check for AS alias: "expression AS alias"
+		if strings.Contains(strings.ToUpper(colDef), " AS ") {
+			parts := strings.SplitN(colDef, " AS ", 2)
+			if len(parts) == 2 {
+				targetCol = strings.TrimSpace(parts[1])
+				sourceCol = c.extractBaseColumnName(parts[0], sourceColumns)
+			}
+		} else {
+			// No alias - column name is the same
+			sourceCol = c.extractBaseColumnName(colDef, sourceColumns)
+			targetCol = sourceCol
+		}
+
+		if sourceCol != "" && targetCol != "" {
+			relationships = append(relationships, ColumnRelationship{
+				SourceColumn: sourceCol,
+				TargetColumn: targetCol,
+			})
+		}
+	}
+
+	return relationships
+}
+
+// extractBaseColumnName extracts the actual column name from an expression
+func (c *ClickHouseClient) extractBaseColumnName(expression string, sourceColumns []ColumnInfo) string {
+	expression = strings.TrimSpace(expression)
+
+	// Remove common functions to find the column name
+	// Handle patterns like: toDate(timestamp), sum(amount), COUNT(*), etc.
+
+	// Check if it's a simple column reference first
+	for _, col := range sourceColumns {
+		if strings.EqualFold(expression, col.Name) {
+			return col.Name
+		}
+	}
+
+	// Try to extract column name from function calls
+	// Look for column names in parentheses or after function names
+	for _, col := range sourceColumns {
+		colName := col.Name
+		// Check if column name appears in the expression
+		if strings.Contains(strings.ToLower(expression), strings.ToLower(colName)) {
+			return colName
+		}
+	}
+
+	// If we can't find a source column, check if it's an aggregate or constant
+	upperExpr := strings.ToUpper(expression)
+	if strings.Contains(upperExpr, "COUNT(") ||
+	   strings.Contains(upperExpr, "SUM(") ||
+	   strings.Contains(upperExpr, "AVG(") ||
+	   strings.Contains(upperExpr, "MIN(") ||
+	   strings.Contains(upperExpr, "MAX(") {
+		// Try to extract column from inside parentheses
+		start := strings.Index(expression, "(")
+		end := strings.LastIndex(expression, ")")
+		if start != -1 && end != -1 && end > start {
+			inner := strings.TrimSpace(expression[start+1 : end])
+			// Recursively check the inner part
+			return c.extractBaseColumnName(inner, sourceColumns)
+		}
+	}
+
+	return ""
+}
+
+// isDistributedTable checks if a table is a Distributed table
+func (c *ClickHouseClient) isDistributedTable(dbName, tableName string) bool {
+	ctx := context.Background()
+	var engine string
+	query := "SELECT engine FROM system.tables WHERE database = ? AND name = ?"
+	row := c.conn.QueryRow(ctx, query, dbName, tableName)
+	if err := row.Scan(&engine); err != nil {
+		return false
+	}
+	return engine == "Distributed"
+}
+
+// buildColumnFlowchart generates a flowchart showing column-level data flow
+func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (string, error) {
+	// Get the current table details
+	currentTable, err := c.GetTableColumns(dbName, tableName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get table details: %v", err)
+	}
+
+	// Get the table's CREATE query to check if it's a MaterializedView
+	ctx := context.Background()
+	fullTableName := dbName + "." + tableName
+
+	var createQuery, engine string
+	query := "SELECT create_table_query, engine FROM system.tables WHERE database = ? AND name = ?"
+	row := c.conn.QueryRow(ctx, query, dbName, tableName)
+	if err := row.Scan(&createQuery, &engine); err != nil {
+		return "", fmt.Errorf("failed to get table info: %v", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("%%{init: {'flowchart': {'curve': 'basis', 'padding': 20}}}%%\n")
+	sb.WriteString("flowchart LR\n")
+
+	// If it's a Materialized View, parse the query to get column mappings
+	if engine == "MaterializedView" {
+		selectQuery, sourceTable, destTable := c.parseViewQuery(createQuery)
+
+		if sourceTable != "" {
+			// Split database and table if source table is fully qualified
+			srcDbName, srcTableName := dbName, sourceTable
+			if strings.Contains(sourceTable, ".") {
+				parts := strings.Split(sourceTable, ".")
+				srcDbName, srcTableName = parts[0], parts[1]
+			}
+
+			// Skip if source table is distributed
+			if c.isDistributedTable(srcDbName, srcTableName) {
+				return "", fmt.Errorf("source table %s.%s is a Distributed table, skipping visualization", srcDbName, srcTableName)
+			}
+
+			// Get source table columns
+			sourceTableDetails, err := c.GetTableColumns(srcDbName, srcTableName)
+			if err == nil {
+				// Extract column mappings
+				columnMappings := c.extractColumnMappings(selectQuery, sourceTableDetails.Columns)
+
+				// Generate source table subgraph
+				sanitizedSourceTable := c.sanitizeTableName(srcTableName)
+				sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedSourceTable, srcTableName))
+				sb.WriteString(fmt.Sprintf("        direction TB\n"))
+				for _, col := range sourceTableDetails.Columns {
+					nodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, col.Name)
+					colType := c.simplifyColumnType(col.Type)
+					sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+				}
+				sb.WriteString("    end\n\n")
+
+				// Generate current MV table subgraph (highlighted)
+				sanitizedMVTable := c.sanitizeTableName(tableName)
+				sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s (MV)\"]\n", sanitizedMVTable, tableName))
+				sb.WriteString(fmt.Sprintf("        direction TB\n"))
+				for _, col := range currentTable.Columns {
+					nodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, col.Name)
+					colType := c.simplifyColumnType(col.Type)
+					sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+				}
+				sb.WriteString("    end\n\n")
+
+				// Style the current MV table
+				sb.WriteString(fmt.Sprintf("    style %s_graph fill:#FF6D00,stroke:#AA00FF,stroke-width:3px,color:#FFFFFF\n\n", sanitizedMVTable))
+
+				// Generate destination table subgraph if exists
+				if destTable != "" {
+					destDbName, destTableName := dbName, destTable
+					if strings.Contains(destTable, ".") {
+						parts := strings.Split(destTable, ".")
+						destDbName, destTableName = parts[0], parts[1]
+					}
+
+					// Skip if destination table is distributed
+					if !c.isDistributedTable(destDbName, destTableName) {
+						destTableDetails, err := c.GetTableColumns(destDbName, destTableName)
+						if err == nil {
+							sanitizedDestTable := c.sanitizeTableName(destTableName)
+							sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedDestTable, destTableName))
+							sb.WriteString(fmt.Sprintf("        direction TB\n"))
+							for _, col := range destTableDetails.Columns {
+								nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, col.Name)
+								colType := c.simplifyColumnType(col.Type)
+								sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+							}
+							sb.WriteString("    end\n\n")
+
+							// Generate arrows from source -> MV -> destination
+							for _, mapping := range columnMappings {
+								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
+								mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
+
+								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+
+								// Try to match MV column to destination column
+								for _, destCol := range destTableDetails.Columns {
+									if strings.EqualFold(destCol.Name, mapping.TargetColumn) {
+										destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+										sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
+										break
+									}
+								}
+							}
+						}
+					}
+				} else {
+					// No destination table - just show source -> MV
+					for _, mapping := range columnMappings {
+						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
+						mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
+						sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+					}
+				}
+			}
+		}
+	} else {
+		// For non-MV tables, show dependencies based on table relations
+		tablesRelations, err := c.getTablesRelations()
+		if err != nil {
+			return "", fmt.Errorf("failed to get table relations: %v", err)
+		}
+
+		// Find tables that current table depends on (source tables)
+		var sourceTables []string
+		var destTables []string
+
+		for _, rel := range tablesRelations {
+			if rel.Table == fullTableName && rel.DependsOnTable != "" {
+				// Check if the dependency table is distributed
+				parts := strings.Split(rel.DependsOnTable, ".")
+				if len(parts) == 2 {
+					depDbName, depTableName := parts[0], parts[1]
+					if !c.isDistributedTable(depDbName, depTableName) {
+						sourceTables = append(sourceTables, rel.DependsOnTable)
+					}
+				}
+			}
+			if rel.DependsOnTable == fullTableName && rel.Table != "" {
+				// Check if the dependent table is distributed
+				parts := strings.Split(rel.Table, ".")
+				if len(parts) == 2 {
+					relDbName, relTableName := parts[0], parts[1]
+					if !c.isDistributedTable(relDbName, relTableName) {
+						destTables = append(destTables, rel.Table)
+					}
+				}
+			}
+		}
+
+		// Generate subgraphs for source tables
+		for _, srcTable := range sourceTables {
+			parts := strings.Split(srcTable, ".")
+			if len(parts) == 2 {
+				srcDbName, srcTableName := parts[0], parts[1]
+				srcDetails, err := c.GetTableColumns(srcDbName, srcTableName)
+				if err == nil {
+					sanitizedSrcTable := c.sanitizeTableName(srcTableName)
+					sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedSrcTable, srcTableName))
+					sb.WriteString("        direction TB\n")
+					for _, col := range srcDetails.Columns {
+						nodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, col.Name)
+						colType := c.simplifyColumnType(col.Type)
+						sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+					}
+					sb.WriteString("    end\n\n")
+				}
+			}
+		}
+
+		// Generate current table subgraph
+		sanitizedCurrentTable := c.sanitizeTableName(tableName)
+		sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedCurrentTable, tableName))
+		sb.WriteString("        direction TB\n")
+		for _, col := range currentTable.Columns {
+			nodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, col.Name)
+			colType := c.simplifyColumnType(col.Type)
+			sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+		}
+		sb.WriteString("    end\n\n")
+		sb.WriteString(fmt.Sprintf("    style %s_graph fill:#FF6D00,stroke:#AA00FF,stroke-width:3px,color:#FFFFFF\n\n", sanitizedCurrentTable))
+
+		// Generate subgraphs for destination tables
+		for _, destTable := range destTables {
+			parts := strings.Split(destTable, ".")
+			if len(parts) == 2 {
+				destDbName, destTableName := parts[0], parts[1]
+				destDetails, err := c.GetTableColumns(destDbName, destTableName)
+				if err == nil {
+					sanitizedDestTable := c.sanitizeTableName(destTableName)
+					sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedDestTable, destTableName))
+					sb.WriteString("        direction TB\n")
+					for _, col := range destDetails.Columns {
+						nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, col.Name)
+						colType := c.simplifyColumnType(col.Type)
+						sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
+					}
+					sb.WriteString("    end\n\n")
+				}
+			}
+		}
+
+		// Generate column-to-column arrows based on column name matching
+		for _, srcTable := range sourceTables {
+			parts := strings.Split(srcTable, ".")
+			if len(parts) == 2 {
+				srcDbName, srcTableName := parts[0], parts[1]
+				srcDetails, err := c.GetTableColumns(srcDbName, srcTableName)
+				if err == nil {
+					sanitizedSrcTable := c.sanitizeTableName(srcTableName)
+					for _, srcCol := range srcDetails.Columns {
+						for _, currCol := range currentTable.Columns {
+							if c.areColumnsRelated(srcCol, currCol) {
+								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, srcCol.Name)
+								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, currNodeID))
+							}
+						}
+					}
+				}
+			}
+		}
+
+		for _, destTable := range destTables {
+			parts := strings.Split(destTable, ".")
+			if len(parts) == 2 {
+				destDbName, destTableName := parts[0], parts[1]
+				destDetails, err := c.GetTableColumns(destDbName, destTableName)
+				if err == nil {
+					sanitizedDestTable := c.sanitizeTableName(destTableName)
+					for _, currCol := range currentTable.Columns {
+						for _, destCol := range destDetails.Columns {
+							if c.areColumnsRelated(currCol, destCol) {
+								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+								destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+								sb.WriteString(fmt.Sprintf("    %s --> %s\n", currNodeID, destNodeID))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return sb.String(), nil
 }
 
 // Close closes the ClickHouse connection
