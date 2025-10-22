@@ -1053,7 +1053,7 @@ function dataflowResetZoom() {
 function applyDataFlowZoom() {
     if (dataflowDiagram) {
         dataflowDiagram.style.transform = `scale(${dataflowZoomLevel})`;
-        dataflowDiagram.style.transformOrigin = 'center center';
+        dataflowDiagram.style.transformOrigin = 'top left';
     }
 }
 
@@ -1076,7 +1076,7 @@ function relationshipsResetZoom() {
 function applyRelationshipsZoom() {
     if (relationshipsDiagram) {
         relationshipsDiagram.style.transform = `scale(${relationshipsZoomLevel})`;
-        relationshipsDiagram.style.transformOrigin = 'center center';
+        relationshipsDiagram.style.transformOrigin = 'top left';
     }
 }
 
