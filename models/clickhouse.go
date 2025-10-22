@@ -893,6 +893,7 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 	// If it's a Materialized View, parse the query to get column mappings
 	if engine == "MaterializedView" {
 		selectQuery, sourceTable, destTable := c.parseViewQuery(createQuery)
+		log.Printf("MV %s: parsed sourceTable=%s, destTable=%s", fullTableName, sourceTable, destTable)
 
 		// If destTable not found in CREATE query, look for it in table relations
 		if destTable == "" {
@@ -901,18 +902,23 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				for _, rel := range tablesRelations {
 					if rel.DependsOnTable == fullTableName && rel.Table != "" {
 						// Found a table that depends on this MV
+						log.Printf("Found relation: %s depends on %s", rel.Table, rel.DependsOnTable)
 						parts := strings.Split(rel.Table, ".")
 						if len(parts) == 2 {
 							relDbName, relTableName := parts[0], parts[1]
 							if !c.isDistributedTable(relDbName, relTableName) {
 								destTable = rel.Table
+								log.Printf("Using destTable from relations: %s", destTable)
 								break
+							} else {
+								log.Printf("Skipping distributed table: %s.%s", relDbName, relTableName)
 							}
 						}
 					}
 				}
 			}
 		}
+		log.Printf("Final destTable for %s: %s", fullTableName, destTable)
 
 		if sourceTable != "" {
 			// Split database and table if source table is fully qualified
@@ -988,12 +994,43 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
 
 								// Try to match MV column to destination column
+								// First try exact name match
+								matched := false
 								for _, destCol := range destTableDetails.Columns {
 									if strings.EqualFold(destCol.Name, mapping.TargetColumn) {
 										destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
 										sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
+										matched = true
 										break
 									}
+								}
+
+								// If no exact match, try using areColumnsRelated for fuzzy matching
+								if !matched {
+									// Find the MV column info
+									for _, mvCol := range currentTable.Columns {
+										if strings.EqualFold(mvCol.Name, mapping.TargetColumn) {
+											// Check if it's related to any destination column
+											for _, destCol := range destTableDetails.Columns {
+												if c.areColumnsRelated(mvCol, destCol) {
+													destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+													sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
+													matched = true
+													break
+												}
+											}
+											break
+										}
+									}
+								}
+
+								// Special case: if MV has only 1 column and dest has only 1 column, connect them
+								// This handles cases like extracting distinct values to a lookup table
+								if !matched && len(currentTable.Columns) == 1 && len(destTableDetails.Columns) == 1 {
+									destCol := destTableDetails.Columns[0]
+									destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+									sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
+									log.Printf("Connected single MV column %s to single dest column %s", mapping.TargetColumn, destCol.Name)
 								}
 							}
 						}
@@ -1102,14 +1139,28 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				srcDetails, err := c.GetTableColumns(srcDbName, srcTableName)
 				if err == nil {
 					sanitizedSrcTable := c.sanitizeTableName(srcTableName)
+
+					// Track if any columns were matched
+					anyMatched := false
 					for _, srcCol := range srcDetails.Columns {
 						for _, currCol := range currentTable.Columns {
 							if c.areColumnsRelated(srcCol, currCol) {
 								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, srcCol.Name)
 								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
 								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, currNodeID))
+								anyMatched = true
 							}
 						}
+					}
+
+					// Special case: if source has 1 column and current has 1 column, connect them
+					if !anyMatched && len(srcDetails.Columns) == 1 && len(currentTable.Columns) == 1 {
+						srcCol := srcDetails.Columns[0]
+						currCol := currentTable.Columns[0]
+						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, srcCol.Name)
+						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+						sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, currNodeID))
+						log.Printf("Connected single source column %s.%s to single current column %s", srcTableName, srcCol.Name, currCol.Name)
 					}
 				}
 			}
@@ -1122,14 +1173,28 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				destDetails, err := c.GetTableColumns(destDbName, destTableName)
 				if err == nil {
 					sanitizedDestTable := c.sanitizeTableName(destTableName)
+
+					// Track if any columns were matched
+					anyMatched := false
 					for _, currCol := range currentTable.Columns {
 						for _, destCol := range destDetails.Columns {
 							if c.areColumnsRelated(currCol, destCol) {
 								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
 								destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
 								sb.WriteString(fmt.Sprintf("    %s --> %s\n", currNodeID, destNodeID))
+								anyMatched = true
 							}
 						}
+					}
+
+					// Special case: if current has 1 column and dest has 1 column, connect them
+					if !anyMatched && len(currentTable.Columns) == 1 && len(destDetails.Columns) == 1 {
+						currCol := currentTable.Columns[0]
+						destCol := destDetails.Columns[0]
+						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+						destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+						sb.WriteString(fmt.Sprintf("    %s --> %s\n", currNodeID, destNodeID))
+						log.Printf("Connected single current column %s to single dest column %s.%s", currCol.Name, destTableName, destCol.Name)
 					}
 				}
 			}
