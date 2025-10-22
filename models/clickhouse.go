@@ -796,13 +796,19 @@ func (c *ClickHouseClient) extractColumnMappings(selectQuery string, sourceColum
 				targetCol = strings.TrimSpace(parts[1])
 				originalExpr = strings.TrimSpace(parts[0])
 				sourceCol = c.extractBaseColumnName(originalExpr, sourceColumns)
-				transformation = c.extractTransformation(originalExpr, sourceCol)
+				// Use the full expression if it's different from just the column name
+				if !strings.EqualFold(originalExpr, sourceCol) {
+					transformation = originalExpr
+				}
 			}
 		} else {
 			// No alias - column name is the same
 			sourceCol = c.extractBaseColumnName(colDef, sourceColumns)
 			targetCol = sourceCol
-			transformation = c.extractTransformation(colDef, sourceCol)
+			// Use the full expression if it's different from just the column name
+			if !strings.EqualFold(colDef, sourceCol) {
+				transformation = colDef
+			}
 		}
 
 		if sourceCol != "" && targetCol != "" {
