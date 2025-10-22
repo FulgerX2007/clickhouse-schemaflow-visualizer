@@ -894,6 +894,26 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 	if engine == "MaterializedView" {
 		selectQuery, sourceTable, destTable := c.parseViewQuery(createQuery)
 
+		// If destTable not found in CREATE query, look for it in table relations
+		if destTable == "" {
+			tablesRelations, err := c.getTablesRelations()
+			if err == nil {
+				for _, rel := range tablesRelations {
+					if rel.DependsOnTable == fullTableName && rel.Table != "" {
+						// Found a table that depends on this MV
+						parts := strings.Split(rel.Table, ".")
+						if len(parts) == 2 {
+							relDbName, relTableName := parts[0], parts[1]
+							if !c.isDistributedTable(relDbName, relTableName) {
+								destTable = rel.Table
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+
 		if sourceTable != "" {
 			// Split database and table if source table is fully qualified
 			srcDbName, srcTableName := dbName, sourceTable
