@@ -806,6 +806,7 @@ func (c *ClickHouseClient) extractColumnMappings(selectQuery string, sourceColum
 		}
 
 		if sourceCol != "" && targetCol != "" {
+			log.Printf("Column mapping: %s -> %s (transformation: '%s', original expr: '%s')", sourceCol, targetCol, transformation, originalExpr)
 			relationships = append(relationships, ColumnRelationship{
 				SourceColumn:   sourceCol,
 				TargetColumn:   targetCol,
