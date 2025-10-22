@@ -66,10 +66,11 @@ type TableDetails struct {
 
 // ColumnRelationship represents a column-to-column mapping
 type ColumnRelationship struct {
-	SourceTable  string
-	SourceColumn string
-	TargetTable  string
-	TargetColumn string
+	SourceTable    string
+	SourceColumn   string
+	TargetTable    string
+	TargetColumn   string
+	Transformation string // The expression used to transform the column (e.g., "sum", "toDate", etc.)
 }
 
 // FlowchartNode represents a column node in the flowchart
@@ -785,30 +786,78 @@ func (c *ClickHouseClient) extractColumnMappings(selectQuery string, sourceColum
 			continue
 		}
 
-		var sourceCol, targetCol string
+		var sourceCol, targetCol, transformation string
+		originalExpr := colDef
 
 		// Check for AS alias: "expression AS alias"
 		if strings.Contains(strings.ToUpper(colDef), " AS ") {
 			parts := strings.SplitN(colDef, " AS ", 2)
 			if len(parts) == 2 {
 				targetCol = strings.TrimSpace(parts[1])
-				sourceCol = c.extractBaseColumnName(parts[0], sourceColumns)
+				originalExpr = strings.TrimSpace(parts[0])
+				sourceCol = c.extractBaseColumnName(originalExpr, sourceColumns)
+				transformation = c.extractTransformation(originalExpr, sourceCol)
 			}
 		} else {
 			// No alias - column name is the same
 			sourceCol = c.extractBaseColumnName(colDef, sourceColumns)
 			targetCol = sourceCol
+			transformation = c.extractTransformation(colDef, sourceCol)
 		}
 
 		if sourceCol != "" && targetCol != "" {
 			relationships = append(relationships, ColumnRelationship{
-				SourceColumn: sourceCol,
-				TargetColumn: targetCol,
+				SourceColumn:   sourceCol,
+				TargetColumn:   targetCol,
+				Transformation: transformation,
 			})
 		}
 	}
 
 	return relationships
+}
+
+// extractTransformation extracts the function/transformation applied to a column
+func (c *ClickHouseClient) extractTransformation(expression, columnName string) string {
+	expression = strings.TrimSpace(expression)
+
+	// If expression is just the column name, no transformation
+	if strings.EqualFold(expression, columnName) {
+		return ""
+	}
+
+	// Common aggregation functions
+	aggregations := []string{"sum", "avg", "min", "max", "count", "uniq", "groupArray", "groupUniqArray", "any", "argMin", "argMax"}
+	for _, agg := range aggregations {
+		if strings.HasPrefix(strings.ToLower(expression), agg+"(") {
+			return agg
+		}
+	}
+
+	// Common transformation functions
+	transformations := []string{"toDate", "toDateTime", "toString", "toInt32", "toInt64", "toFloat64", "toUInt32", "toUInt64",
+		"lower", "upper", "substring", "concat", "trim", "reverse", "formatDateTime", "parseDateTimeBestEffort"}
+	for _, trans := range transformations {
+		if strings.HasPrefix(strings.ToLower(expression), trans+"(") {
+			return trans
+		}
+	}
+
+	// Check if it contains the column name - if yes, it's some transformation
+	if strings.Contains(strings.ToLower(expression), strings.ToLower(columnName)) {
+		// Try to extract the function name (anything before the first parenthesis)
+		parenIdx := strings.Index(expression, "(")
+		if parenIdx > 0 {
+			funcName := strings.TrimSpace(expression[:parenIdx])
+			// Check if it looks like a function name (alphanumeric and underscore)
+			if len(funcName) > 0 && funcName[0] != '(' {
+				return funcName
+			}
+		}
+		return "transform"
+	}
+
+	return ""
 }
 
 // extractBaseColumnName extracts the actual column name from an expression
@@ -991,7 +1040,12 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
 								mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
 
-								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+								// Add transformation label if present
+								if mapping.Transformation != "" {
+									sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, mapping.Transformation, mvNodeID))
+								} else {
+									sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+								}
 
 								// Try to match MV column to destination column
 								// First try exact name match
@@ -1040,7 +1094,13 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					for _, mapping := range columnMappings {
 						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
 						mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
-						sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+
+						// Add transformation label if present
+						if mapping.Transformation != "" {
+							sb.WriteString(fmt.Sprintf("    %s -->|%s| %s\n", srcNodeID, mapping.Transformation, mvNodeID))
+						} else {
+							sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, mvNodeID))
+						}
 					}
 				}
 			}
