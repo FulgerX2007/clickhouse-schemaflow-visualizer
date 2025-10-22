@@ -399,6 +399,35 @@ func (c *ClickHouseClient) sanitizeTableName(tableName string) string {
 	return sanitized
 }
 
+// sanitizeColumnName sanitizes column names for use as Mermaid node IDs
+func (c *ClickHouseClient) sanitizeColumnName(columnName string) string {
+	// Replace special characters that break Mermaid syntax
+	sanitized := strings.ReplaceAll(columnName, ".", "_")
+	sanitized = strings.ReplaceAll(sanitized, "-", "_")
+	sanitized = strings.ReplaceAll(sanitized, " ", "_")
+	sanitized = strings.ReplaceAll(sanitized, "(", "_")
+	sanitized = strings.ReplaceAll(sanitized, ")", "_")
+	sanitized = strings.ReplaceAll(sanitized, "[", "_")
+	sanitized = strings.ReplaceAll(sanitized, "]", "_")
+	sanitized = strings.ReplaceAll(sanitized, "{", "_")
+	sanitized = strings.ReplaceAll(sanitized, "}", "_")
+	sanitized = strings.ReplaceAll(sanitized, ":", "_")
+	sanitized = strings.ReplaceAll(sanitized, ";", "_")
+	sanitized = strings.ReplaceAll(sanitized, ",", "_")
+	sanitized = strings.ReplaceAll(sanitized, "|", "_")
+	sanitized = strings.ReplaceAll(sanitized, "\"", "_")
+	sanitized = strings.ReplaceAll(sanitized, "'", "_")
+	sanitized = strings.ReplaceAll(sanitized, "/", "_")
+	sanitized = strings.ReplaceAll(sanitized, "\\", "_")
+
+	// If it starts with a number, prefix with underscore
+	if len(sanitized) > 0 && sanitized[0] >= '0' && sanitized[0] <= '9' {
+		sanitized = "_" + sanitized
+	}
+
+	return sanitized
+}
+
 // Helper function to simplify column types for ER diagrams
 func (c *ClickHouseClient) simplifyColumnType(columnType string) string {
 	// Simplify complex ClickHouse types for better readability
@@ -1012,7 +1041,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedSourceTable, srcTableName))
 				sb.WriteString(fmt.Sprintf("        direction TB\n"))
 				for _, col := range sourceTableDetails.Columns {
-					nodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, col.Name)
+					sanitizedColName := c.sanitizeColumnName(col.Name)
+					nodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, sanitizedColName)
 					colType := c.simplifyColumnType(col.Type)
 					sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 				}
@@ -1023,7 +1053,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s (MV)\"]\n", sanitizedMVTable, tableName))
 				sb.WriteString(fmt.Sprintf("        direction TB\n"))
 				for _, col := range currentTable.Columns {
-					nodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, col.Name)
+					sanitizedColName := c.sanitizeColumnName(col.Name)
+					nodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, sanitizedColName)
 					colType := c.simplifyColumnType(col.Type)
 					sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 				}
@@ -1048,7 +1079,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 							sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedDestTable, destTableName))
 							sb.WriteString(fmt.Sprintf("        direction TB\n"))
 							for _, col := range destTableDetails.Columns {
-								nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, col.Name)
+								sanitizedColName := c.sanitizeColumnName(col.Name)
+								nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, sanitizedColName)
 								colType := c.simplifyColumnType(col.Type)
 								sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 							}
@@ -1056,8 +1088,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 
 							// Generate arrows from source -> MV -> destination
 							for _, mapping := range columnMappings {
-								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
-								mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
+								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, c.sanitizeColumnName(mapping.SourceColumn))
+								mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, c.sanitizeColumnName(mapping.TargetColumn))
 
 								// Add transformation label if present
 								if mapping.Transformation != "" {
@@ -1073,7 +1105,7 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 								matched := false
 								for _, destCol := range destTableDetails.Columns {
 									if strings.EqualFold(destCol.Name, mapping.TargetColumn) {
-										destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+										destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, c.sanitizeColumnName(destCol.Name))
 										sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
 										matched = true
 										break
@@ -1088,7 +1120,7 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 											// Check if it's related to any destination column
 											for _, destCol := range destTableDetails.Columns {
 												if c.areColumnsRelated(mvCol, destCol) {
-													destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+													destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, c.sanitizeColumnName(destCol.Name))
 													sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
 													matched = true
 													break
@@ -1103,7 +1135,7 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 								// This handles cases like extracting distinct values to a lookup table
 								if !matched && len(currentTable.Columns) == 1 && len(destTableDetails.Columns) == 1 {
 									destCol := destTableDetails.Columns[0]
-									destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+									destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, c.sanitizeColumnName(destCol.Name))
 									sb.WriteString(fmt.Sprintf("    %s --> %s\n", mvNodeID, destNodeID))
 									log.Printf("Connected single MV column %s to single dest column %s", mapping.TargetColumn, destCol.Name)
 								}
@@ -1113,8 +1145,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 				} else {
 					// No destination table - just show source -> MV
 					for _, mapping := range columnMappings {
-						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, mapping.SourceColumn)
-						mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, mapping.TargetColumn)
+						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSourceTable, c.sanitizeColumnName(mapping.SourceColumn))
+						mvNodeID := fmt.Sprintf("%s_%s", sanitizedMVTable, c.sanitizeColumnName(mapping.TargetColumn))
 
 						// Add transformation label if present
 						if mapping.Transformation != "" {
@@ -1173,7 +1205,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedSrcTable, srcTableName))
 					sb.WriteString("        direction TB\n")
 					for _, col := range srcDetails.Columns {
-						nodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, col.Name)
+						sanitizedColName := c.sanitizeColumnName(col.Name)
+						nodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, sanitizedColName)
 						colType := c.simplifyColumnType(col.Type)
 						sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 					}
@@ -1187,7 +1220,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 		sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedCurrentTable, tableName))
 		sb.WriteString("        direction TB\n")
 		for _, col := range currentTable.Columns {
-			nodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, col.Name)
+			sanitizedColName := c.sanitizeColumnName(col.Name)
+			nodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, sanitizedColName)
 			colType := c.simplifyColumnType(col.Type)
 			sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 		}
@@ -1205,7 +1239,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					sb.WriteString(fmt.Sprintf("    subgraph %s_graph[\"%s\"]\n", sanitizedDestTable, destTableName))
 					sb.WriteString("        direction TB\n")
 					for _, col := range destDetails.Columns {
-						nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, col.Name)
+						sanitizedColName := c.sanitizeColumnName(col.Name)
+						nodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, sanitizedColName)
 						colType := c.simplifyColumnType(col.Type)
 						sb.WriteString(fmt.Sprintf("        %s[\"%s: %s\"]\n", nodeID, col.Name, colType))
 					}
@@ -1228,8 +1263,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					for _, srcCol := range srcDetails.Columns {
 						for _, currCol := range currentTable.Columns {
 							if c.areColumnsRelated(srcCol, currCol) {
-								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, srcCol.Name)
-								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+								srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, c.sanitizeColumnName(srcCol.Name))
+								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, c.sanitizeColumnName(currCol.Name))
 								sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, currNodeID))
 								anyMatched = true
 							}
@@ -1240,8 +1275,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					if !anyMatched && len(srcDetails.Columns) == 1 && len(currentTable.Columns) == 1 {
 						srcCol := srcDetails.Columns[0]
 						currCol := currentTable.Columns[0]
-						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, srcCol.Name)
-						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
+						srcNodeID := fmt.Sprintf("%s_%s", sanitizedSrcTable, c.sanitizeColumnName(srcCol.Name))
+						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, c.sanitizeColumnName(currCol.Name))
 						sb.WriteString(fmt.Sprintf("    %s --> %s\n", srcNodeID, currNodeID))
 						log.Printf("Connected single source column %s.%s to single current column %s", srcTableName, srcCol.Name, currCol.Name)
 					}
@@ -1262,8 +1297,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					for _, currCol := range currentTable.Columns {
 						for _, destCol := range destDetails.Columns {
 							if c.areColumnsRelated(currCol, destCol) {
-								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
-								destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+								currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, c.sanitizeColumnName(currCol.Name))
+								destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, c.sanitizeColumnName(destCol.Name))
 								sb.WriteString(fmt.Sprintf("    %s --> %s\n", currNodeID, destNodeID))
 								anyMatched = true
 							}
@@ -1274,8 +1309,8 @@ func (c *ClickHouseClient) buildColumnFlowchart(dbName, tableName string) (strin
 					if !anyMatched && len(currentTable.Columns) == 1 && len(destDetails.Columns) == 1 {
 						currCol := currentTable.Columns[0]
 						destCol := destDetails.Columns[0]
-						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, currCol.Name)
-						destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, destCol.Name)
+						currNodeID := fmt.Sprintf("%s_%s", sanitizedCurrentTable, c.sanitizeColumnName(currCol.Name))
+						destNodeID := fmt.Sprintf("%s_%s", sanitizedDestTable, c.sanitizeColumnName(destCol.Name))
 						sb.WriteString(fmt.Sprintf("    %s --> %s\n", currNodeID, destNodeID))
 						log.Printf("Connected single current column %s to single dest column %s.%s", currCol.Name, destTableName, destCol.Name)
 					}
