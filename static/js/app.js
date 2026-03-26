@@ -1,3 +1,9 @@
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 const databaseTree = document.getElementById('database-tree');
 const refreshBtn = document.getElementById('refresh-btn');
 const currentSelection = document.getElementById('current-selection');
@@ -38,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
         startOnLoad: false,
         theme: 'Neo',
         look: 'Neo',
-        securityLevel: 'loose',
+        securityLevel: 'strict',
         flowchart: {
             useMaxWidth: true,
             htmlLabels: true
@@ -349,7 +355,7 @@ function renderMermaidDiagram(schema) {
         mermaid.initialize({
             startOnLoad: false,
             theme: 'default',
-            securityLevel: 'loose',
+            securityLevel: 'strict',
             flowchart: {
                 useMaxWidth: true,
                 htmlLabels: true
@@ -579,7 +585,7 @@ ${exportSchema}
                             mermaid.initialize({
                                 startOnLoad: false,
                                 theme: 'default',
-                                securityLevel: 'loose',
+                                securityLevel: 'strict',
                                 flowchart: {
                                     useMaxWidth: true,
                                     htmlLabels: true
@@ -617,7 +623,7 @@ ${exportSchema}
                                     mermaid.initialize({
                                         startOnLoad: false,
                                         theme: 'default',
-                                        securityLevel: 'loose',
+                                        securityLevel: 'strict',
                                         flowchart: {
                                             useMaxWidth: true,
                                             htmlLabels: true
@@ -837,11 +843,11 @@ function renderTableDetails(details) {
             <h4><i class="fa-solid fa-info-circle"></i> Table Information</h4>
             <div class="table-info-grid">
                 <span class="table-info-label">Name:</span>
-                <span class="table-info-value">${details.name}</span>
+                <span class="table-info-value">${escapeHtml(details.name)}</span>
                 <span class="table-info-label">Database:</span>
-                <span class="table-info-value">${details.database}</span>
+                <span class="table-info-value">${escapeHtml(details.database)}</span>
                 <span class="table-info-label">Engine:</span>
-                <span class="table-info-value">${details.engine}</span>
+                <span class="table-info-value">${escapeHtml(details.engine)}</span>
                 <span class="table-info-label">Rows:</span>
                 <span class="table-info-value">${formatRows(details.total_rows)}</span>
                 <span class="table-info-label">Size:</span>
@@ -861,8 +867,8 @@ function renderTableDetails(details) {
                 <tbody>
                     ${details.columns.map(column => `
                         <tr>
-                            <td class="column-name">${column.name}</td>
-                            <td><span class="column-type">${column.type}</span></td>
+                            <td class="column-name">${escapeHtml(column.name)}</td>
+                            <td><span class="column-type">${escapeHtml(column.type)}</span></td>
                         </tr>
                     `).join('')}
                 </tbody>
@@ -877,7 +883,7 @@ function showTableDetailsError(message) {
     tableDetailsContent.innerHTML = `
         <div class="no-table-selected">
             <i class="fa-solid fa-exclamation-triangle"></i>
-            <p>${message}</p>
+            <p>${escapeHtml(message)}</p>
         </div>
     `;
 }
@@ -991,7 +997,7 @@ function renderMermaidDiagramInContainer(container, schema, type) {
         mermaid.initialize({
             startOnLoad: false,
             theme: 'default',
-            securityLevel: 'loose',
+            securityLevel: 'strict',
             flowchart: {
                 useMaxWidth: true,
                 htmlLabels: true

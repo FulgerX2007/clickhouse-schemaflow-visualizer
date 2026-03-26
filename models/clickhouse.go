@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/go-faster/city"
 )
+
+const maxRelationDepth = 50
 
 // Config holds the ClickHouse connection configuration
 type Config struct {
@@ -189,13 +192,14 @@ func formatRows(rows *uint64) string {
 
 // generateTableListContent creates the content for table display in the left sidebar
 func generateTableListContent(icon, tableName string, totalRows *uint64, totalBytes *uint64) string {
+	safeTableName := html.EscapeString(tableName)
 	if totalRows == nil {
-		return fmt.Sprintf(`%s %s`, icon, tableName)
+		return fmt.Sprintf(`%s %s`, icon, safeTableName)
 	}
 
 	return fmt.Sprintf(
 		`%s %s<br><small style="color: #000; font-size: 0.8em;">Rows: <b>%s</b> | Size: <b>%s</b></small>`,
-		icon, tableName, formatRows(totalRows), formatBytes(totalBytes),
+		icon, safeTableName, formatRows(totalRows), formatBytes(totalBytes),
 	)
 }
 
@@ -207,7 +211,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 
 	log.Println("Querying tables relations")
 	ctx := context.Background()
-	query := fmt.Sprintf("SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name")
+	query := "SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tables: %v", err)
@@ -379,8 +383,8 @@ func (c *ClickHouseClient) GenerateMermaidSchema(dbName, tableName string) (stri
 	sb.WriteString(fmt.Sprintf("    style %d fill:#FF6D00,stroke:#AA00FF,color:#FFFFFF\n\n", city.Hash32([]byte(table))))
 
 	seen := make(map[string]bool)
-	c.getRelationsNext(&sb, tablesRelations, table, &seen)
-	c.getRelationsBack(&sb, tablesRelations, table, &seen)
+	c.getRelationsNext(&sb, tablesRelations, table, &seen, 0)
+	c.getRelationsBack(&sb, tablesRelations, table, &seen, 0)
 
 	return sb.String(), nil
 }
@@ -634,18 +638,22 @@ func (c *ClickHouseClient) getColumnRelationshipType(col1, col2 ColumnInfo) stri
 }
 
 func (c *ClickHouseClient) generateTableNodeContent(table string) string {
+	safeTable := html.EscapeString(table)
 	if metadata, exists := TableMetadata[table]; exists && metadata.TotalRows != nil {
 		return fmt.Sprintf(
 			"%s<br><small>Rows: <b>%s</b> Size: <b>%s</b></small>",
-			table,
+			safeTable,
 			formatRows(metadata.TotalRows),
 			formatBytes(metadata.TotalBytes),
 		)
 	}
-	return table
+	return safeTable
 }
 
-func (c *ClickHouseClient) getRelationsNext(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool) {
+func (c *ClickHouseClient) getRelationsNext(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool, depth int) {
+	if depth >= maxRelationDepth {
+		return
+	}
 	for _, rel := range tablesRelations {
 		if rel.DependsOnTable == table && table != "" {
 			depContent := c.generateTableNodeContent(rel.DependsOnTable)
@@ -661,12 +669,15 @@ func (c *ClickHouseClient) getRelationsNext(sb *strings.Builder, tablesRelations
 				(*seen)[mermaidRow] = true
 				sb.WriteString(mermaidRow)
 			}
-			c.getRelationsNext(sb, tablesRelations, rel.Table, seen)
+			c.getRelationsNext(sb, tablesRelations, rel.Table, seen, depth+1)
 		}
 	}
 }
 
-func (c *ClickHouseClient) getRelationsBack(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool) {
+func (c *ClickHouseClient) getRelationsBack(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool, depth int) {
+	if depth >= maxRelationDepth {
+		return
+	}
 	for _, rel := range tablesRelations {
 		if rel.Table == table && rel.DependsOnTable != "" {
 			depContent := c.generateTableNodeContent(rel.DependsOnTable)
@@ -682,7 +693,7 @@ func (c *ClickHouseClient) getRelationsBack(sb *strings.Builder, tablesRelations
 				(*seen)[mermaidRow] = true
 				sb.WriteString(mermaidRow)
 			}
-			c.getRelationsBack(sb, tablesRelations, rel.DependsOnTable, seen)
+			c.getRelationsBack(sb, tablesRelations, rel.DependsOnTable, seen, depth+1)
 		}
 	}
 }
