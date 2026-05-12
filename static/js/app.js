@@ -1,35 +1,79 @@
+// ─── Utilities ───────────────────────────────────────────────────────────
 function escapeHtml(str) {
     const div = document.createElement('div');
-    div.textContent = str;
+    div.textContent = str == null ? '' : String(str);
     return div.innerHTML;
 }
 
-const databaseTree = document.getElementById('database-tree');
-const refreshBtn = document.getElementById('refresh-btn');
-const currentSelection = document.getElementById('current-selection');
-const dataflowDiagram = document.getElementById('dataflow-diagram');
+const ENGINE_TYPES = {
+    mergetree:   { icon: 'fa-database',         name: 'MergeTree',         glyph: '▤' },
+    replicated:  { icon: 'fa-circle-nodes',     name: 'Replicated',        glyph: '◈' },
+    distributed: { icon: 'fa-diagram-project',  name: 'Distributed',       glyph: '⋈' },
+    mview:       { icon: 'fa-eye',              name: 'MaterializedView',  glyph: '◐' },
+    dictionary:  { icon: 'fa-book',             name: 'Dictionary',        glyph: '☱' },
+};
+
+function classifyEngine(engineName) {
+    if (!engineName) return 'mergetree';
+    const e = engineName.toLowerCase();
+    if (e === 'distributed') return 'distributed';
+    if (e === 'materializedview') return 'mview';
+    if (e.startsWith('dictionary')) return 'dictionary';
+    if (e.startsWith('replicated')) return 'replicated';
+    return 'mergetree';
+}
+
+function classifyFromIconClassList(classList) {
+    for (const cls of classList) {
+        for (const [key, v] of Object.entries(ENGINE_TYPES)) {
+            if (cls === v.icon) return key;
+        }
+    }
+    return null;
+}
+
+function formatRows(rows) {
+    if (rows == null) return '—';
+    if (rows >= 1e9) return (rows / 1e9).toFixed(2) + 'B';
+    if (rows >= 1e6) return (rows / 1e6).toFixed(1) + 'M';
+    if (rows >= 1e3) return (rows / 1e3).toFixed(1) + 'K';
+    return Number(rows).toLocaleString();
+}
+
+function formatBytes(bytes) {
+    if (!bytes) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = bytes;
+    let i = 0;
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return `${size.toFixed(1)} ${units[i]}`;
+}
+
+// ─── DOM references ──────────────────────────────────────────────────────
+const databaseTree       = document.getElementById('database-tree');
+const refreshBtn         = document.getElementById('refresh-btn');
+const currentSelection   = document.getElementById('current-selection');
+const dataflowDiagram    = document.getElementById('dataflow-diagram');
 const relationshipsDiagram = document.getElementById('relationships-diagram');
-const exportHtmlBtn = document.getElementById('export-html-btn');
+const exportHtmlBtn      = document.getElementById('export-html-btn');
+const dbCountEl          = document.getElementById('db-count');
 
-// Data Flow controls
-const dataflowZoomInBtn = document.getElementById('dataflow-zoom-in-btn');
-const dataflowZoomOutBtn = document.getElementById('dataflow-zoom-out-btn');
-const dataflowResetZoomBtn = document.getElementById('dataflow-reset-zoom-btn');
-
-// Relationships controls
-const relationshipsZoomInBtn = document.getElementById('relationships-zoom-in-btn');
-const relationshipsZoomOutBtn = document.getElementById('relationships-zoom-out-btn');
+const dataflowZoomInBtn      = document.getElementById('dataflow-zoom-in-btn');
+const dataflowZoomOutBtn     = document.getElementById('dataflow-zoom-out-btn');
+const dataflowResetZoomBtn   = document.getElementById('dataflow-reset-zoom-btn');
+const relationshipsZoomInBtn    = document.getElementById('relationships-zoom-in-btn');
+const relationshipsZoomOutBtn   = document.getElementById('relationships-zoom-out-btn');
 const relationshipsResetZoomBtn = document.getElementById('relationships-reset-zoom-btn');
 
-// Section management
-const sectionTabs = document.querySelectorAll('.section-tab');
-const dataFlowSection = document.getElementById('data-flow-section');
-const relationshipsSection = document.getElementById('relationships-section');
+const sectionTabs           = document.querySelectorAll('.section-tab');
+const dataFlowSection       = document.getElementById('data-flow-section');
+const relationshipsSection  = document.getElementById('relationships-section');
 
 const tableDetailsContainer = document.querySelector('.table-details-container');
-const tableDetailsContent = document.getElementById('table-details');
+const tableDetailsContent   = document.getElementById('table-details');
 const toggleTableDetailsBtn = document.getElementById('toggle-table-details');
 
+// ─── State ───────────────────────────────────────────────────────────────
 let databases = [];
 let selectedDatabase = null;
 let selectedTable = null;
@@ -39,735 +83,522 @@ let currentActiveSection = 'data-flow';
 let dataflowZoomLevel = 1;
 let relationshipsZoomLevel = 1;
 
+// ─── Mermaid theming ─────────────────────────────────────────────────────
+const MERMAID_THEME = {
+    startOnLoad: false,
+    securityLevel: 'loose', // needed so embedded <i> icons in node labels render
+    theme: 'base',
+    themeVariables: {
+        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+        fontSize: '12px',
+        background: '#fafafa',
+        primaryColor: '#ffffff',
+        primaryTextColor: '#0b0d12',
+        primaryBorderColor: '#e8e8ea',
+        lineColor: '#cbd0d8',
+        secondaryColor: '#ffffff',
+        tertiaryColor: '#ffffff',
+        nodeBorder: '#e8e8ea',
+        clusterBkg: '#ffffff',
+        clusterBorder: '#e8e8ea',
+        edgeLabelBackground: '#ffffff',
+    },
+    flowchart: {
+        useMaxWidth: false,
+        htmlLabels: true,
+        curve: 'basis',
+        padding: 16,
+        nodeSpacing: 24,
+        rankSpacing: 44,
+    },
+};
+
+// ─── Boot ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    mermaid.initialize({
-        startOnLoad: false,
-        theme: 'Neo',
-        look: 'Neo',
-        securityLevel: 'strict',
-        flowchart: {
-            useMaxWidth: true,
-            htmlLabels: true
-        }
-    });
-    console.log("Mermaid initialized successfully");
+    if (typeof mermaid !== 'undefined') {
+        mermaid.initialize(MERMAID_THEME);
+        console.log('Mermaid initialized');
+    }
 
     loadDatabases();
 
     refreshBtn.addEventListener('click', loadDatabases);
     exportHtmlBtn.addEventListener('click', exportHtml);
-    
-    // Data Flow zoom controls
-    dataflowZoomInBtn.addEventListener('click', () => dataflowZoomIn());
-    dataflowZoomOutBtn.addEventListener('click', () => dataflowZoomOut());
-    dataflowResetZoomBtn.addEventListener('click', () => dataflowResetZoom());
-    
-    // Relationships zoom controls
-    relationshipsZoomInBtn.addEventListener('click', () => relationshipsZoomIn());
-    relationshipsZoomOutBtn.addEventListener('click', () => relationshipsZoomOut());
-    relationshipsResetZoomBtn.addEventListener('click', () => relationshipsResetZoom());
-    
-    // Section tab switching
-    sectionTabs.forEach(tab => {
+
+    dataflowZoomInBtn.addEventListener('click', dataflowZoomIn);
+    dataflowZoomOutBtn.addEventListener('click', dataflowZoomOut);
+    dataflowResetZoomBtn.addEventListener('click', dataflowResetZoom);
+
+    relationshipsZoomInBtn.addEventListener('click', relationshipsZoomIn);
+    relationshipsZoomOutBtn.addEventListener('click', relationshipsZoomOut);
+    relationshipsResetZoomBtn.addEventListener('click', relationshipsResetZoom);
+
+    sectionTabs.forEach((tab) => {
         tab.addEventListener('click', () => switchSection(tab.dataset.section));
     });
-    
-    // Setup collapsible Database header section
+
+    const savedActiveSection = localStorage.getItem('activeSection');
+    if (savedActiveSection === 'relationships') switchSection('relationships');
+
     const databaseHeader = document.getElementById('database-header');
     const sidebar = document.querySelector('.sidebar');
     if (databaseHeader && sidebar) {
         databaseHeader.addEventListener('click', () => {
             databaseHeader.classList.toggle('collapsed');
             sidebar.classList.toggle('database-collapsed');
-            // Save collapsed state to localStorage
-            const isCollapsed = databaseHeader.classList.contains('collapsed');
-            localStorage.setItem('databaseHeaderCollapsed', isCollapsed);
+            localStorage.setItem('databaseHeaderCollapsed', databaseHeader.classList.contains('collapsed'));
         });
-        
-        // Restore collapsed state from localStorage
-        const savedDatabaseState = localStorage.getItem('databaseHeaderCollapsed');
-        if (savedDatabaseState === 'true') {
+        if (localStorage.getItem('databaseHeaderCollapsed') === 'true') {
             databaseHeader.classList.add('collapsed');
             sidebar.classList.add('database-collapsed');
         }
     }
-    
-    // Setup collapsible Table Types section
+
     const tableTypesHeader = document.querySelector('.legend-container .collapsible-header');
     if (tableTypesHeader) {
         tableTypesHeader.addEventListener('click', () => {
             tableTypesHeader.classList.toggle('collapsed');
-            // Save collapsed state to localStorage
-            const isCollapsed = tableTypesHeader.classList.contains('collapsed');
-            localStorage.setItem('tableTypesCollapsed', isCollapsed);
+            localStorage.setItem('tableTypesCollapsed', tableTypesHeader.classList.contains('collapsed'));
         });
-        
-        // Restore collapsed state from localStorage
-        const savedCollapsedState = localStorage.getItem('tableTypesCollapsed');
-        if (savedCollapsedState === 'true') {
+        if (localStorage.getItem('tableTypesCollapsed') === 'true') {
             tableTypesHeader.classList.add('collapsed');
         }
     }
-    
-    // Setup metadata toggle
+
     const metadataToggle = document.getElementById('metadata-toggle');
     if (metadataToggle) {
         metadataToggle.addEventListener('change', toggleMetadataVisibility);
-        
-        // Restore metadata visibility state from localStorage (default is hidden)
-        const savedMetadataState = localStorage.getItem('metadataVisible');
-        const isVisible = savedMetadataState === 'true';
+        const isVisible = localStorage.getItem('metadataVisible') === 'true';
         metadataToggle.checked = isVisible;
         updateMetadataVisibility(isVisible);
     }
-    
-    // Setup table details toggle
+
     const tableDetailsHeader = document.querySelector('.table-details-header');
     if (tableDetailsHeader) {
         tableDetailsHeader.addEventListener('click', toggleTableDetails);
-        
-        // Restore table details visibility state from localStorage
-        const savedTableDetailsState = localStorage.getItem('tableDetailsVisible');
-        const isVisible = savedTableDetailsState !== 'false'; // Default to visible
-        if (!isVisible) {
-            tableDetailsContainer.classList.add('collapsed');
-        }
+        const isVisible = localStorage.getItem('tableDetailsVisible') !== 'false';
+        if (!isVisible) tableDetailsContainer.classList.add('collapsed');
     }
 });
 
+// ─── Data loading ────────────────────────────────────────────────────────
 async function loadDatabases() {
     try {
         const response = await fetch('/api/databases');
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         databases = await response.json();
         renderDatabaseTree();
     } catch (error) {
         console.error('Error loading databases:', error);
-        showError('Failed to load databases. Please check your connection to ClickHouse.');
+        showError('Failed to load databases. Check the ClickHouse connection.');
     }
 }
 
 function renderDatabaseTree() {
     databaseTree.innerHTML = '';
 
+    let dbList = [];
+
     if (typeof databases === 'object' && !Array.isArray(databases)) {
-        Object.entries(databases).forEach(([dbName, dbContent]) => {
-            const dbItem = document.createElement('li');
-
-            const dbSpan = document.createElement('span');
-            dbSpan.className = 'database';
-            
-            // Get table count for this database
-            const tableCount = typeof dbContent === 'object' && !Array.isArray(dbContent) ? Object.keys(dbContent).length : 0;
-            dbSpan.textContent = dbName;
-            dbSpan.dataset.count = tableCount;
-            
-            dbSpan.addEventListener('click', () => toggleDatabase(dbItem));
-
-            dbItem.appendChild(dbSpan);
-
-            const tablesList = document.createElement('ul');
-            tablesList.style.display = 'none';
-
-            if (typeof dbContent === 'object' && !Array.isArray(dbContent) && !dbContent.tables) {
-                Object.entries(dbContent).forEach(([dbTable, tableName]) => {
-                    addTableToList(tablesList, dbName, dbTable, tableName);
-                });
-            }
-
-            dbItem.appendChild(tablesList);
-            databaseTree.appendChild(dbItem);
-        });
+        dbList = Object.entries(databases).map(([name, content]) => ({
+            name,
+            tables: content && typeof content === 'object' ? content : {},
+        }));
     } else if (Array.isArray(databases)) {
-        databases.forEach(db => {
-            const dbItem = document.createElement('li');
-            const dbSpan = document.createElement('span');
-            dbSpan.className = 'database';
-            
-            // Count tables in this database
-            let tableCount = 0;
-            if (db.tables) {
-                if (Array.isArray(db.tables)) {
-                    tableCount = db.tables.length;
-                } else if (typeof db.tables === 'object') {
-                    tableCount = Object.keys(db.tables).length;
-                }
-            } else if (typeof db === 'object') {
-                tableCount = Object.keys(db).filter(key => key !== 'name').length;
-            }
-            
-            dbSpan.textContent = db.name || db.toString();
-            dbSpan.dataset.count = tableCount;
-            dbSpan.addEventListener('click', () => toggleDatabase(dbItem));
-            dbItem.appendChild(dbSpan);
-
-            const tablesList = document.createElement('ul');
-            tablesList.style.display = 'none';
-
-            if (db.tables) {
-                if (Array.isArray(db.tables)) {
-                    db.tables.forEach(table => {
-                        const tableName = typeof table === 'string' ? table : table.name;
-                        addTableToList(tablesList, db.name, tableName);
-                    });
-                } else if (typeof db.tables === 'object') {
-                    Object.keys(db.tables).forEach(tableName => {
-                        addTableToList(tablesList, db.name, tableName);
-                    });
-                }
-            } else if (typeof db === 'object') {
-                const dbName = db.name || db.toString();
-                Object.keys(db)
-                    .filter(key => key !== 'name')
-                    .forEach(tableName => {
-                        addTableToList(tablesList, dbName, tableName);
-                    });
-            }
-
-            dbItem.appendChild(tablesList);
-            databaseTree.appendChild(dbItem);
-        });
-    } else {
-        console.error('Unexpected databases structure:', databases);
-        showError('The database structure is not in the expected format.');
+        dbList = databases.map((db) => ({
+            name: db.name || String(db),
+            tables: db.tables || {},
+        }));
     }
+
+    if (dbCountEl) dbCountEl.textContent = dbList.length;
+
+    dbList.forEach(({ name, tables }) => {
+        const dbItem = document.createElement('li');
+
+        const dbSpan = document.createElement('span');
+        dbSpan.className = 'database';
+
+        const tableEntries = Array.isArray(tables)
+            ? tables.map((t) => [typeof t === 'string' ? t : t.name, ''])
+            : Object.entries(tables);
+
+        dbSpan.dataset.count = tableEntries.length;
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'db-name';
+        nameEl.textContent = name;
+        dbSpan.appendChild(nameEl);
+
+        dbSpan.addEventListener('click', () => toggleDatabase(dbItem, dbSpan));
+
+        dbItem.appendChild(dbSpan);
+
+        const tablesList = document.createElement('ul');
+        tablesList.style.display = 'none';
+
+        tableEntries.forEach(([tableName, displayHtml]) => {
+            addTableToList(tablesList, name, tableName, displayHtml);
+        });
+
+        dbItem.appendChild(tablesList);
+        databaseTree.appendChild(dbItem);
+    });
 }
 
-function addTableToList(tablesList, dbName, dbTable, showTableName) {
+// Map of "database.table" → engine key, populated as the sidebar renders.
+// Used by the diagram decorator to apply per-engine rail colors.
+const tableEngineMap = new Map();
+
+function detectEngineFromIconHtml(html) {
+    if (typeof html !== 'string') return null;
+    if (html.includes('fa-database'))        return 'mergetree';
+    if (html.includes('fa-circle-nodes'))    return 'replicated';
+    if (html.includes('fa-diagram-project')) return 'distributed';
+    if (html.includes('fa-eye'))             return 'mview';
+    if (html.includes('fa-book'))            return 'dictionary';
+    // The backend uses fa-table as a default fallback for non-matched engines
+    // (e.g., SummingMergeTree, AggregatingMergeTree). Treat as MergeTree family.
+    if (html.includes('fa-table'))           return 'mergetree';
+    return null;
+}
+
+// Find an engine key by matching the rendered node text against the registered
+// "db.table" map. Mermaid concatenates the label with the <small> metadata
+// (e.g., "aggregated.cnx_6minRows: 358.2M …"), so we (a) chop off the metadata
+// suffix at "Rows:" / "Size:" if present, then (b) try direct lookup, then
+// (c) fall back to a longest-prefix scan of the map for cases that include
+// trailing chars.
+function lookupEngineByLabel(text) {
+    const raw = (text || '').replace(/\s+/g, ' ').trim();
+    if (!raw || !tableEngineMap.size) return null;
+
+    const stripped = raw.split(/\s*(?:Rows:|Size:)/)[0].trim();
+    if (tableEngineMap.has(stripped)) return tableEngineMap.get(stripped);
+
+    let bestKey = null;
+    for (const key of tableEngineMap.keys()) {
+        if (!stripped.startsWith(key) && !raw.startsWith(key)) continue;
+        if (!bestKey || key.length > bestKey.length) bestKey = key;
+    }
+    return bestKey ? tableEngineMap.get(bestKey) : null;
+}
+
+function addTableToList(tablesList, dbName, dbTable, showHtml) {
     const tableItem = document.createElement('li');
     tableItem.className = 'table';
-    tableItem.innerHTML = showTableName;
+
+    const iconMatch = typeof showHtml === 'string' ? showHtml.match(/<i [^>]*><\/i>/) : null;
+    const iconHtml = iconMatch ? iconMatch[0] : '';
+    const rest = (typeof showHtml === 'string' ? showHtml.replace(/<i [^>]*><\/i>/, '') : dbTable).trim();
+
+    tableItem.innerHTML = `${iconHtml}<span class="table-text">${rest || escapeHtml(dbTable)}</span>`;
     tableItem.dataset.database = dbName;
     tableItem.dataset.table = dbTable;
     tableItem.title = dbTable;
+
+    const engineKey = detectEngineFromIconHtml(iconHtml);
+    if (engineKey) {
+        tableEngineMap.set(`${dbName}.${dbTable}`, engineKey);
+        tableItem.dataset.engine = engineKey;
+    }
 
     tableItem.addEventListener('click', () => selectTable(tableItem));
 
     tablesList.appendChild(tableItem);
 }
 
-function toggleDatabase(dbItem) {
+function toggleDatabase(dbItem, dbSpan) {
     const tablesList = dbItem.querySelector('ul');
-    if (tablesList.style.display === 'none') {
-        tablesList.style.display = 'block';
-    } else {
-        tablesList.style.display = 'none';
-    }
+    const isOpen = tablesList.style.display !== 'none';
+    tablesList.style.display = isOpen ? 'none' : 'block';
+    dbSpan.classList.toggle('open', !isOpen);
 }
 
 async function selectTable(tableItem) {
-    const previouslySelected = document.querySelector('.table.selected');
-    if (previouslySelected) {
-        previouslySelected.classList.remove('selected');
-    }
-
+    const previouslySelected = document.querySelector('.tree-view .table.selected');
+    if (previouslySelected) previouslySelected.classList.remove('selected');
     tableItem.classList.add('selected');
 
     selectedDatabase = tableItem.dataset.database;
     selectedTable = tableItem.dataset.table;
 
-    // Reset zoom levels when selecting a new table
     dataflowZoomLevel = 1;
     relationshipsZoomLevel = 1;
 
-    currentSelection.textContent = `${selectedDatabase} / ${selectedTable}`;
+    renderBreadcrumb({ database: selectedDatabase, table: selectedTable, engine: null });
 
-    await loadTableSchemas();
-    await loadTableDetails(selectedDatabase, selectedTable);
+    await Promise.all([loadTableSchemas(), loadTableDetails(selectedDatabase, selectedTable)]);
 }
 
-async function loadTableSchema() {
+function renderBreadcrumb({ database, table, engine }) {
+    const engineKey = engine ? classifyEngine(engine) : null;
+    const chipHtml = engineKey
+        ? `<span class="crumb-chip ${engineKey}">${escapeHtml(ENGINE_TYPES[engineKey].name)}</span>`
+        : '';
+    const engineDetail = engine && engineKey && engine !== ENGINE_TYPES[engineKey].name
+        ? `<span class="crumb-engine"> · ${escapeHtml(engine)}</span>`
+        : '';
+
+    currentSelection.innerHTML = `
+        <span class="crumb-root">schema</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-db">${escapeHtml(database)}</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-tb">${escapeHtml(table)}</span>
+        ${chipHtml}${engineDetail}
+    `;
+}
+
+// ─── Section switching + zoom ────────────────────────────────────────────
+function switchSection(sectionName) {
+    sectionTabs.forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.section === sectionName);
+    });
+    if (sectionName === 'data-flow') {
+        dataFlowSection.classList.remove('hidden');
+        relationshipsSection.classList.add('hidden');
+        currentActiveSection = 'data-flow';
+    } else {
+        dataFlowSection.classList.add('hidden');
+        relationshipsSection.classList.remove('hidden');
+        currentActiveSection = 'relationships';
+    }
+    localStorage.setItem('activeSection', sectionName);
+}
+
+function dataflowZoomIn()    { dataflowZoomLevel = Math.min(dataflowZoomLevel + 0.1, 4); applyDataFlowZoom(); }
+function dataflowZoomOut()   { dataflowZoomLevel = Math.max(dataflowZoomLevel - 0.1, 0.5); applyDataFlowZoom(); }
+function dataflowResetZoom() { dataflowZoomLevel = 1; applyDataFlowZoom(); }
+function applyDataFlowZoom() {
+    if (dataflowDiagram) dataflowDiagram.style.transform = `scale(${dataflowZoomLevel})`;
+}
+
+function relationshipsZoomIn()    { relationshipsZoomLevel = Math.min(relationshipsZoomLevel + 0.1, 4); applyRelationshipsZoom(); }
+function relationshipsZoomOut()   { relationshipsZoomLevel = Math.max(relationshipsZoomLevel - 0.1, 0.5); applyRelationshipsZoom(); }
+function relationshipsResetZoom() { relationshipsZoomLevel = 1; applyRelationshipsZoom(); }
+function applyRelationshipsZoom() {
+    if (relationshipsDiagram) relationshipsDiagram.style.transform = `scale(${relationshipsZoomLevel})`;
+}
+
+// ─── Schema loading ──────────────────────────────────────────────────────
+async function loadTableSchemas() {
     if (!selectedDatabase || !selectedTable) return;
 
     try {
-        const response = await fetch(`/api/schema/${selectedDatabase}/${selectedTable}`);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
+        const [flowResp, relResp] = await Promise.all([
+            fetch(`/api/schema/${selectedDatabase}/${selectedTable}`),
+            fetch(`/api/relationships/${selectedDatabase}/${selectedTable}`),
+        ]);
+        if (!flowResp.ok) throw new Error(`Data Flow: HTTP ${flowResp.status}`);
+        if (!relResp.ok) throw new Error(`Relationships: HTTP ${relResp.status}`);
 
-        const data = await response.json();
-        currentSchema = data.schema;
+        const flowData = await flowResp.json();
+        const relData  = await relResp.json();
 
-        // Render the schema
-        renderSchema();
+        currentDataFlowSchema      = flowData.schema;
+        currentRelationshipsSchema = relData.schema;
+
+        renderDataFlowSchema();
+        renderRelationshipsSchema();
     } catch (error) {
-        console.error('Error loading table schema:', error);
-        showError('Failed to load table schema.');
+        console.error('Error loading schemas:', error);
+        showError('Failed to load table schemas.');
     }
 }
 
-function formatMermaidSchema(schema) {
-    if (!schema || typeof schema !== 'string') return schema;
-
-    console.log("Original schema:", schema);
-
-    return schema;
+function renderDataFlowSchema() {
+    if (!currentDataFlowSchema) return;
+    renderMermaidDiagramInContainer(dataflowDiagram, currentDataFlowSchema, 'dataflow');
 }
 
-function renderSchema() {
-    if (!currentSchema) return;
+function renderRelationshipsSchema() {
+    if (!currentRelationshipsSchema) return;
+    renderMermaidDiagramInContainer(relationshipsDiagram, currentRelationshipsSchema, 'relationships');
+}
 
-    const formattedSchema = formatMermaidSchema(currentSchema);
+async function renderMermaidDiagramInContainer(container, schema, type) {
+    if (!container || !schema) return;
+    container.innerHTML = '';
 
-    console.log("Formatted schema to render:", formattedSchema);
+    const mermaidContainer = document.createElement('div');
+    mermaidContainer.className = 'mermaid';
+    mermaidContainer.textContent = schema;
+    container.appendChild(mermaidContainer);
 
     if (typeof mermaid === 'undefined') {
-        console.error("Mermaid is not defined when trying to render schema. Waiting for it to load...");
-        showError("Diagram library is loading. Please wait a moment and try again.");
-
-        const mermaidRenderInterval = setInterval(() => {
+        const id = setInterval(() => {
             if (typeof mermaid !== 'undefined') {
-                clearInterval(mermaidRenderInterval);
-                try {
-                    console.log("Mermaid now available. Initializing with schema:", formattedSchema);
-                    renderMermaidDiagram(formattedSchema);
-                } catch (error) {
-                    console.error("Error during Mermaid initialization after waiting:", error);
-                    showError("Failed to render diagram. Check console for details.");
-                }
+                clearInterval(id);
+                renderMermaidDiagramInContainer(container, schema, type);
             }
         }, 100);
         return;
     }
 
     try {
-        renderMermaidDiagram(formattedSchema);
+        mermaid.initialize(MERMAID_THEME);
+        await mermaid.run({ nodes: [mermaidContainer] });
+        decorateMermaidNodes(mermaidContainer);
+
+        if (type === 'dataflow') {
+            applyDataFlowZoom();
+            setupMouseWheelZoomForSection(dataFlowSection, 'dataflow');
+        } else {
+            applyRelationshipsZoom();
+            setupMouseWheelZoomForSection(relationshipsSection, 'relationships');
+        }
     } catch (error) {
-        console.error("Error during Mermaid initialization:", error);
-        showError("Failed to render diagram. Check console for details.");
+        console.error(`Error rendering ${type} diagram:`, error);
+        showRawSchemaInContainer(container, schema);
     }
 }
 
-function renderMermaidDiagram(schema) {
-    schemaDiagram.innerHTML = '';
+// ─── Colored rail injection (Variant A node style) ───────────────────────
+// After Mermaid renders, walk each .node, detect engine type from the embedded
+// Font Awesome icon, and prepend a 3px colored rect along the left edge.
+function decorateMermaidNodes(root) {
+    if (!root) return;
+    const svg = root.querySelector('svg');
+    if (!svg) return;
 
-    const container = document.createElement('div');
-    container.className = 'mermaid';
-    container.textContent = schema;
-    schemaDiagram.appendChild(container);
+    // ensure SVG fills container width naturally
+    svg.style.maxWidth = '100%';
+    svg.removeAttribute('style');
 
-    console.log("Rendering Mermaid diagram with schema:", schema);
+    const nodes = svg.querySelectorAll('g.node');
+    nodes.forEach((node) => {
+        // Skip cluster/subgraph headers
+        if (node.classList.contains('cluster')) return;
 
-    try {
-        mermaid.initialize({
-            startOnLoad: false,
-            theme: 'default',
-            securityLevel: 'strict',
-            flowchart: {
-                useMaxWidth: true,
-                htmlLabels: true
-            },
-            er: {
-                diagramPadding: 20,
-                layoutDirection: 'TB',
-                minEntityWidth: 100,
-                minEntityHeight: 75,
-                entityPadding: 15
-            }
+        // Detect engine type from contained <i> icon classes (only present in some
+        // rendering paths) — fall back to a name lookup populated from the sidebar.
+        let engineKey = null;
+        node.querySelectorAll('i').forEach((iconEl) => {
+            if (engineKey) return;
+            const k = classifyFromIconClassList(iconEl.classList);
+            if (k) engineKey = k;
         });
+        if (!engineKey) {
+            engineKey = lookupEngineByLabel(node.textContent || '');
+        }
 
-        mermaid.init(undefined, '.mermaid');
-        console.log("Mermaid initialization successful");
-        
-        applyZoom();
-        
-        setupMouseWheelZoom();
-    } catch (error) {
-        console.error("Error during Mermaid initialization:", error);
-        // Fallback to show raw schema
-        showRawSchema(schema);
-    }
+        // Find the principal shape (first rect/polygon/circle/ellipse in this node)
+        const shape = node.querySelector('rect, polygon, circle, ellipse');
+        if (!shape) return;
+
+        // Detect "current" node by the backend's hardcoded orange fill (#FF6D00)
+        const inlineStyle = shape.getAttribute('style') || '';
+        const fillAttr = shape.getAttribute('fill') || '';
+        const isCurrent =
+            inlineStyle.includes('#FF6D00') || inlineStyle.includes('#ff6d00')
+            || inlineStyle.includes('rgb(255, 109, 0)') || inlineStyle.includes('rgb(255,109,0)')
+            || fillAttr.toLowerCase() === '#ff6d00';
+
+        // Strip the backend's hardcoded orange/purple !important inline styles so our
+        // theme can apply. We re-style "current" nodes via the .current class hook.
+        if (isCurrent) {
+            shape.removeAttribute('style');
+            shape.removeAttribute('fill');
+            shape.removeAttribute('stroke');
+            // Backend also writes color:#FFFFFF on label foreignObject content — drop it
+            // so labels stay visible on the white card.
+            node.querySelectorAll('[style]').forEach((el) => {
+                const s = el.getAttribute('style') || '';
+                if (/#FF6D00|#ff6d00|#AA00FF|#aa00ff|#FFFFFF|rgb\(255,\s*255,\s*255\)/.test(s)) {
+                    el.removeAttribute('style');
+                }
+            });
+        } else if (inlineStyle.includes('!important')) {
+            shape.removeAttribute('style');
+        }
+
+        // Apply engine + current class hooks (used by CSS rules)
+        if (engineKey) node.classList.add(`engine-${engineKey}`);
+        if (isCurrent) node.classList.add('current');
+
+        // For rects only, inject the colored rail on the left edge
+        if (shape.tagName.toLowerCase() === 'rect') {
+            // Avoid double-inject on re-renders
+            if (node.querySelector('.rail-bar')) return;
+
+            const x = parseFloat(shape.getAttribute('x')) || 0;
+            const y = parseFloat(shape.getAttribute('y')) || 0;
+            const h = parseFloat(shape.getAttribute('height')) || 0;
+            const rx = parseFloat(shape.getAttribute('rx')) || 0;
+
+            const rail = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rail.setAttribute('class', 'rail-bar');
+            rail.setAttribute('x', x);
+            rail.setAttribute('y', y);
+            rail.setAttribute('width', '3');
+            rail.setAttribute('height', h);
+            if (rx) rail.setAttribute('rx', Math.min(rx, 2));
+            // Insert just after the principal shape so it draws above the body
+            shape.parentNode.insertBefore(rail, shape.nextSibling);
+        }
+    });
 }
 
-function showRawSchema(schema) {
-    schemaDiagram.innerHTML = '';
-    const rawSchemaDisplay = document.createElement('pre');
-    rawSchemaDisplay.style.whiteSpace = 'pre-wrap';
-    rawSchemaDisplay.style.fontFamily = 'monospace';
-    rawSchemaDisplay.style.padding = '10px';
-    rawSchemaDisplay.style.border = '1px solid #ccc';
-    rawSchemaDisplay.textContent = schema;
-    schemaDiagram.appendChild(rawSchemaDisplay);
-    showError("Failed to render diagram. Showing raw schema instead.");
+function showRawSchemaInContainer(container, schema) {
+    container.innerHTML = '';
+    const raw = document.createElement('pre');
+    raw.style.whiteSpace = 'pre-wrap';
+    raw.style.fontFamily = 'inherit';
+    raw.style.padding = '12px';
+    raw.style.border = '1px solid var(--border)';
+    raw.style.borderRadius = '6px';
+    raw.style.background = '#fff';
+    raw.textContent = schema;
+    container.appendChild(raw);
 }
 
-function exportHtml() {
-    if (!currentSchema) {
-        showError('No schema to export.');
+// ─── Pan + wheel zoom ────────────────────────────────────────────────────
+function setupMouseWheelZoomForSection(sectionContainer, sectionType) {
+    if (!sectionContainer) return;
+    const scrollArea = sectionContainer.querySelector('.diagram-scroll-area');
+    if (!scrollArea || scrollArea.dataset.zoomBound === '1') {
         return;
     }
+    scrollArea.dataset.zoomBound = '1';
 
-    const exportSchema = formatMermaidSchema(currentSchema);
-
-    const html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>${selectedDatabase} - ${selectedTable} Schema</title>
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" crossorigin="anonymous" defer></script>
-            <style>
-                body { 
-                    font-family: Arial, sans-serif; 
-                    margin: 20px;
-                    overflow: hidden;
-                }
-                h1 { color: #2c3e50; }
-                .mermaid { 
-                    font-family: 'Courier New', Courier, monospace;
-                }
-                .raw-schema { 
-                    white-space: pre-wrap; 
-                    font-family: monospace; 
-                    padding: 10px; 
-                    border: 1px solid #ccc; 
-                    margin-top: 20px;
-                    display: none;
-                }
-                .schema-container {
-                    position: relative;
-                    height: calc(100vh - 100px);
-                    overflow: auto;
-                    user-select: none;
-                    cursor: grab;
-                }
-                .schema-container:active {
-                    cursor: grabbing;
-                }
-                #schema-diagram {
-                    transform-origin: top left;
-                    transition: transform 0.2s ease;
-                    min-height: 100%;
-                    min-width: 100%;
-                }
-                .view-controls {
-                    position: fixed;
-                    top: 80px;
-                    right: 30px;
-                    z-index: 1000;
-                    display: flex;
-                    gap: 5px;
-                    background: rgba(255, 255, 255, 0.9);
-                    padding: 5px;
-                    border-radius: 5px;
-                    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-                }
-                .view-controls button {
-                    padding: 0.5rem 1rem;
-                    margin-left: 0.5rem;
-                    background-color: #007bff;
-                    color: #fff;
-                    border: none;
-                    border-radius: 3px;
-                    cursor: pointer;
-                }
-                .view-controls button:hover {
-                    background-color: #f0f0f0;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>${selectedDatabase} - ${selectedTable} Schema</h1>
-            <div class="view-controls">
-                <button id="zoom-in-btn" title="Zoom in">+</button>
-                <button id="zoom-out-btn" title="Zoom out">-</button>
-                <button id="reset-zoom-btn" title="Reset zoom">↺</button>
-            </div>
-            <div class="schema-container">
-                <div id="schema-diagram">
-                    <pre class="mermaid">
-${exportSchema}
-                    </pre>
-                </div>
-            </div>
-            <div id="raw-schema" class="raw-schema">
-${exportSchema}
-            </div>
-            <script>
-                document.addEventListener('DOMContentLoaded', function() {
-                    const rawSchema = document.getElementById('raw-schema');
-                    const schemaDiagram = document.getElementById('schema-diagram');
-                    const schemaContainer = document.querySelector('.schema-container');
-                    const zoomInBtn = document.getElementById('zoom-in-btn');
-                    const zoomOutBtn = document.getElementById('zoom-out-btn');
-                    const resetZoomBtn = document.getElementById('reset-zoom-btn');
-                    
-                    let currentZoomLevel = 1;
-                    
-                    function showRawSchema() {
-                        rawSchema.style.display = 'block';
-                    }
-
-                    // Zoom functions
-                    function zoomIn() {
-                        currentZoomLevel = Math.min(currentZoomLevel + 0.1, 20);
-                        applyZoom();
-                    }
-
-                    function zoomOut() {
-                        currentZoomLevel = Math.max(currentZoomLevel - 0.1, 0.5);
-                        applyZoom();
-                    }
-
-                    function resetZoom() {
-                        currentZoomLevel = 1;
-                        applyZoom();
-                    }
-
-                    function applyZoom() {
-                        if (schemaDiagram) {
-                            schemaDiagram.style.transform = \`scale(\${currentZoomLevel})\`;
-                        }
-                    }
-
-                    // Mouse drag functionality
-                    let isDragging = false;
-                    let startX, startY, scrollLeft, scrollTop;
-
-                    schemaContainer.addEventListener('mousedown', (e) => {
-                        isDragging = true;
-                        schemaContainer.style.cursor = 'grabbing';
-                        startX = e.pageX - schemaContainer.offsetLeft;
-                        startY = e.pageY - schemaContainer.offsetTop;
-                        scrollLeft = schemaContainer.scrollLeft;
-                        scrollTop = schemaContainer.scrollTop;
-                    });
-
-                    schemaContainer.addEventListener('mouseleave', () => {
-                        isDragging = false;
-                        schemaContainer.style.cursor = 'grab';
-                    });
-
-                    schemaContainer.addEventListener('mouseup', () => {
-                        isDragging = false;
-                        schemaContainer.style.cursor = 'grab';
-                    });
-
-                    schemaContainer.addEventListener('mousemove', (e) => {
-                        if (!isDragging) return;
-                        
-                        e.preventDefault();
-                        const x = e.pageX - schemaContainer.offsetLeft;
-                        const y = e.pageY - schemaContainer.offsetTop;
-                        
-                        const moveX = (x - startX);
-                        const moveY = (y - startY);
-                        
-                        schemaContainer.scrollLeft = scrollLeft - moveX;
-                        schemaContainer.scrollTop = scrollTop - moveY;
-                    });
-
-                    // Mouse wheel zoom
-                    schemaContainer.addEventListener('wheel', (event) => {
-                        event.preventDefault();
-                        const delta = event.deltaY || event.detail || event.wheelDelta;
-                        if (delta < 0) {
-                            zoomIn();
-                        } else {
-                            zoomOut();
-                        }
-                    }, { passive: false });
-
-                    // Button event listeners
-                    zoomInBtn.addEventListener('click', zoomIn);
-                    zoomOutBtn.addEventListener('click', zoomOut);
-                    resetZoomBtn.addEventListener('click', resetZoom);
-
-                    // Initialize Mermaid
-                    if (typeof mermaid !== 'undefined') {
-                        try {
-                            console.log("Initializing Mermaid in exported HTML");
-
-                            mermaid.initialize({
-                                startOnLoad: false,
-                                theme: 'default',
-                                securityLevel: 'strict',
-                                flowchart: {
-                                    useMaxWidth: true,
-                                    htmlLabels: true
-                                },
-                                er: {
-                                    diagramPadding: 20,
-                                    layoutDirection: 'TB',
-                                    minEntityWidth: 100,
-                                    minEntityHeight: 75,
-                                    entityPadding: 15
-                                }
-                            });
-
-                            try {
-                                mermaid.init(undefined, '.mermaid');
-                                console.log("Mermaid initialization successful");
-                            } catch (renderError) {
-                                console.error("Mermaid render error:", renderError);
-                                showRawSchema();
-                            }
-                        } catch (error) {
-                            console.error("Error during Mermaid initialization:", error);
-                            showRawSchema();
-                        }
-                    } else {
-                        console.error("Mermaid is not defined in exported HTML");
-                        showRawSchema();
-
-                        const mermaidCheckInterval = setInterval(function() {
-                            if (typeof mermaid !== 'undefined') {
-                                clearInterval(mermaidCheckInterval);
-                                try {
-                                    console.log("Mermaid now available in exported HTML");
-
-                                    mermaid.initialize({
-                                        startOnLoad: false,
-                                        theme: 'default',
-                                        securityLevel: 'strict',
-                                        flowchart: {
-                                            useMaxWidth: true,
-                                            htmlLabels: true
-                                        },
-                                        er: {
-                                            diagramPadding: 20,
-                                            layoutDirection: 'TB',
-                                            minEntityWidth: 100,
-                                            minEntityHeight: 75,
-                                            entityPadding: 15
-                                        }
-                                    });
-
-                                    try {
-                                        mermaid.init(undefined, '.mermaid');
-                                        console.log("Mermaid initialization successful after waiting");
-                                        rawSchema.style.display = 'none';
-                                    } catch (renderError) {
-                                        console.error("Mermaid render error after waiting:", renderError);
-                                        showRawSchema();
-                                    }
-                                } catch (error) {
-                                    console.error("Error during Mermaid initialization after waiting:", error);
-                                    showRawSchema();
-                                }
-                            }
-                        }, 100);
-                    }
-                });
-            </script>
-        </body>
-        </html>
-    `;
-
-    // Create a blob and download link
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selectedDatabase}_${selectedTable}_schema.html`;
-    document.body.appendChild(a);
-    a.click();
-
-    // Clean up
-    setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    }, 100);
-}
-
-function zoomIn() {
-    currentZoomLevel = Math.min(currentZoomLevel + 0.1, 20);  // Increased max zoom from 3 to 10
-    applyZoom();
-}
-
-function zoomOut() {
-    currentZoomLevel = Math.max(currentZoomLevel - 0.1, 0.5);
-    applyZoom();
-}
-
-function resetZoom() {
-    currentZoomLevel = 1;
-    applyZoom();
-}
-
-function applyZoom() {
-    if (schemaDiagram) {
-        schemaDiagram.style.transform = `scale(${currentZoomLevel})`;
-        
-        const schemaContainer = document.querySelector('.schema-container');
-        if (schemaContainer) {
-            if (currentZoomLevel > 1) {
-                schemaContainer.style.overflow = 'auto';
-            } else {
-                schemaContainer.style.overflow = 'auto';
-            }
+    scrollArea.addEventListener('wheel', (event) => {
+        if (!event.ctrlKey && !event.metaKey) return; // only zoom with Ctrl/Cmd
+        event.preventDefault();
+        const delta = event.deltaY;
+        if (sectionType === 'dataflow') {
+            if (delta < 0) dataflowZoomIn(); else dataflowZoomOut();
+        } else {
+            if (delta < 0) relationshipsZoomIn(); else relationshipsZoomOut();
         }
-    }
-}
+    }, { passive: false });
 
-function setupMouseWheelZoom() {
-    const schemaContainer = document.querySelector('.schema-container');
-    if (!schemaContainer) return;
-    
-    schemaContainer.removeEventListener('wheel', handleMouseWheel);
-    schemaContainer.addEventListener('wheel', handleMouseWheel, { passive: false });
-    
-    // Setup mouse drag scrolling
     let isDragging = false;
     let startX, startY, scrollLeft, scrollTop;
-    
-    schemaContainer.style.cursor = 'grab';
-    
-    schemaContainer.addEventListener('mousedown', (e) => {
+
+    scrollArea.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
         isDragging = true;
-        schemaContainer.style.cursor = 'grabbing';
-        startX = e.pageX - schemaContainer.offsetLeft;
-        startY = e.pageY - schemaContainer.offsetTop;
-        scrollLeft = schemaContainer.scrollLeft;
-        scrollTop = schemaContainer.scrollTop;
-    });
-    
-    schemaContainer.addEventListener('mouseleave', () => {
-        isDragging = false;
-        schemaContainer.style.cursor = 'grab';
-    });
-    
-    schemaContainer.addEventListener('mouseup', () => {
-        isDragging = false;
-        schemaContainer.style.cursor = 'grab';
-    });
-    
-    schemaContainer.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        
+        scrollArea.style.cursor = 'grabbing';
+        startX = e.pageX - scrollArea.offsetLeft;
+        startY = e.pageY - scrollArea.offsetTop;
+        scrollLeft = scrollArea.scrollLeft;
+        scrollTop = scrollArea.scrollTop;
         e.preventDefault();
-        const x = e.pageX - schemaContainer.offsetLeft;
-        const y = e.pageY - schemaContainer.offsetTop;
-        
-        const moveX = (x - startX);
-        const moveY = (y - startY);
-        
-        schemaContainer.scrollLeft = scrollLeft - moveX;
-        schemaContainer.scrollTop = scrollTop - moveY;
     });
-    
-    console.log("Mouse wheel zoom and drag support set up");
+    scrollArea.addEventListener('mouseleave', () => { isDragging = false; scrollArea.style.cursor = 'grab'; });
+    scrollArea.addEventListener('mouseup', () => { isDragging = false; scrollArea.style.cursor = 'grab'; });
+    scrollArea.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        const x = e.pageX - scrollArea.offsetLeft;
+        const y = e.pageY - scrollArea.offsetTop;
+        scrollArea.scrollLeft = scrollLeft - (x - startX);
+        scrollArea.scrollTop  = scrollTop  - (y - startY);
+    });
 }
 
-function handleMouseWheel(event) {
-    event.preventDefault();
-    
-    const delta = event.deltaY || event.detail || event.wheelDelta;
-    
-    if (delta < 0) {
-        zoomIn();
-    } else {
-        zoomOut();
-    }
-    
-    console.log(`Zoom level: ${currentZoomLevel.toFixed(1)}`);
-}
-
+// ─── Toggles ─────────────────────────────────────────────────────────────
 function toggleMetadataVisibility() {
     const metadataToggle = document.getElementById('metadata-toggle');
     const isVisible = metadataToggle.checked;
@@ -777,38 +608,24 @@ function toggleMetadataVisibility() {
 
 function updateMetadataVisibility(isVisible) {
     const sidebar = document.querySelector('.sidebar');
-    if (sidebar) {
-        if (isVisible) {
-            sidebar.classList.add('metadata-visible');
-        } else {
-            sidebar.classList.remove('metadata-visible');
-        }
-    }
+    if (sidebar) sidebar.classList.toggle('metadata-visible', isVisible);
 }
 
 function toggleTableDetails() {
     tableDetailsContainer.classList.toggle('collapsed');
     const isVisible = !tableDetailsContainer.classList.contains('collapsed');
     localStorage.setItem('tableDetailsVisible', isVisible);
-    
-    // Update button icon rotation
-    const icon = toggleTableDetailsBtn.querySelector('i');
-    if (icon) {
-        icon.style.transform = isVisible ? 'rotate(90deg)' : 'rotate(0deg)';
-    }
 }
 
+// ─── Table details panel ────────────────────────────────────────────────
 async function loadTableDetails(database, table) {
     if (!database || !table) return;
-
     try {
         const response = await fetch(`/api/table/${database}/${table}`);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const tableDetails = await response.json();
-        renderTableDetails(tableDetails);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const details = await response.json();
+        renderTableDetails(details);
+        renderBreadcrumb({ database: details.database, table: details.name, engine: details.engine });
     } catch (error) {
         console.error('Error loading table details:', error);
         showTableDetailsError('Failed to load table details.');
@@ -821,344 +638,126 @@ function renderTableDetails(details) {
         return;
     }
 
-    const formatBytes = (bytes) => {
-        if (!bytes) return 'N/A';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        let size = bytes;
-        let unitIndex = 0;
-        while (size >= 1024 && unitIndex < units.length - 1) {
-            size /= 1024;
-            unitIndex++;
-        }
-        return `${size.toFixed(1)} ${units[unitIndex]}`;
-    };
-
-    const formatRows = (rows) => {
-        if (!rows) return 'N/A';
-        return rows.toLocaleString();
-    };
+    const engineKey = classifyEngine(details.engine);
+    const cols = Array.isArray(details.columns) ? details.columns : [];
 
     const html = `
         <div class="table-info">
-            <h4><i class="fa-solid fa-info-circle"></i> Table Information</h4>
+            <h4>information</h4>
             <div class="table-info-grid">
-                <span class="table-info-label">Name:</span>
-                <span class="table-info-value">${escapeHtml(details.name)}</span>
-                <span class="table-info-label">Database:</span>
+                <span class="table-info-label">name</span>
+                <span class="table-info-value" style="font-weight:600">${escapeHtml(details.name)}</span>
+                <span class="table-info-label">database</span>
                 <span class="table-info-value">${escapeHtml(details.database)}</span>
-                <span class="table-info-label">Engine:</span>
-                <span class="table-info-value">${escapeHtml(details.engine)}</span>
-                <span class="table-info-label">Rows:</span>
-                <span class="table-info-value">${formatRows(details.total_rows)}</span>
-                <span class="table-info-label">Size:</span>
+                <span class="table-info-label">engine</span>
+                <span class="table-info-value engine-chip ${engineKey}">${escapeHtml(details.engine)}</span>
+                <span class="table-info-label">rows</span>
+                <span class="table-info-value numeric">${details.total_rows != null ? formatRows(details.total_rows) : '—'}</span>
+                <span class="table-info-label">size</span>
                 <span class="table-info-value">${formatBytes(details.total_bytes)}</span>
             </div>
         </div>
-        
+
         <div class="columns-section">
-            <h4><i class="fa-solid fa-columns"></i> Columns (${details.columns.length})</h4>
+            <h4>columns <span class="col-count">${cols.length} total</span></h4>
             <table class="columns-table">
                 <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Type</th>
-                    </tr>
+                    <tr><th>Name</th><th>Type</th></tr>
                 </thead>
                 <tbody>
-                    ${details.columns.map(column => `
+                    ${cols.map((column) => `
                         <tr>
-                            <td class="column-name">${escapeHtml(column.name)}</td>
-                            <td><span class="column-type">${escapeHtml(column.type)}</span></td>
+                            <td class="column-name" title="${escapeHtml(column.name)}">${escapeHtml(column.name)}</td>
+                            <td><span class="column-type" title="${escapeHtml(column.type)}">${escapeHtml(column.type)}</span></td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
         </div>
     `;
-
     tableDetailsContent.innerHTML = html;
 }
 
 function showTableDetailsError(message) {
     tableDetailsContent.innerHTML = `
         <div class="no-table-selected">
-            <i class="fa-solid fa-exclamation-triangle"></i>
             <p>${escapeHtml(message)}</p>
         </div>
     `;
 }
 
-function showNoTableSelected() {
-    tableDetailsContent.innerHTML = '<p class="no-table-selected">Select a table to view its details</p>';
-}
-
 function showError(message) {
+    console.error(message);
+    // Lightweight non-blocking notice; alert kept as last-resort fallback
     alert(message);
 }
 
-// Section switching functionality
-function switchSection(sectionName) {
-    // Update active tab
-    sectionTabs.forEach(tab => {
-        tab.classList.remove('active');
-        if (tab.dataset.section === sectionName) {
-            tab.classList.add('active');
-        }
-    });
-    
-    // Show/hide sections
-    if (sectionName === 'data-flow') {
-        dataFlowSection.classList.remove('hidden');
-        relationshipsSection.classList.add('hidden');
-        currentActiveSection = 'data-flow';
-    } else if (sectionName === 'relationships') {
-        dataFlowSection.classList.add('hidden');
-        relationshipsSection.classList.remove('hidden');
-        currentActiveSection = 'relationships';
+// ─── Export HTML ─────────────────────────────────────────────────────────
+function exportHtml() {
+    const schema = currentActiveSection === 'data-flow'
+        ? currentDataFlowSchema
+        : currentRelationshipsSchema;
+
+    if (!schema) {
+        showError('No schema to export. Select a table first.');
+        return;
     }
-    
-    // Save active section to localStorage
-    localStorage.setItem('activeSection', sectionName);
-}
 
-// Load schemas for both sections
-async function loadTableSchemas() {
-    if (!selectedDatabase || !selectedTable) return;
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>${escapeHtml(selectedDatabase || '')} / ${escapeHtml(selectedTable || '')} — schemaflow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" crossorigin="anonymous" defer><\/script>
+<style>
+  :root { --accent:#3b5bdb; --border:#e8e8ea; --bg:#fafafa; --text:#0b0d12; --muted:#6b7280; }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin:0; font-family:'JetBrains Mono', ui-monospace, monospace; background:var(--bg); color:var(--text); }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); background:#fff; }
+  header h1 { margin:0; font-size:13px; font-weight:600; }
+  header .crumb { font-size:11px; color:var(--muted); margin-top:4px; }
+  .canvas { padding:24px; min-height:calc(100vh - 56px); background-image: radial-gradient(circle, #d8dadf 1px, transparent 1px); background-size: 20px 20px; display:flex; justify-content:center; }
+  .mermaid { font-family: inherit; }
+  .mermaid .node rect { fill:#fff !important; stroke:var(--border) !important; }
+  .mermaid .edgePath .path { stroke:#cbd0d8 !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>${escapeHtml(selectedDatabase)} / ${escapeHtml(selectedTable)}</h1>
+  <div class="crumb">schemaflow · ${currentActiveSection === 'data-flow' ? 'Data Flow' : 'Column Relationships'}</div>
+</header>
+<div class="canvas"><pre class="mermaid">${escapeHtml(schema)}</pre></div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  if (typeof mermaid === 'undefined') return;
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+      primaryColor: '#ffffff', primaryTextColor: '#0b0d12',
+      primaryBorderColor: '#e8e8ea', lineColor: '#cbd0d8'
+    },
+    flowchart: { curve: 'basis', nodeSpacing: 24, rankSpacing: 44 }
+  });
+});
+<\/script>
+</body>
+</html>`;
 
-    try {
-        // Load Data Flow schema (existing endpoint)
-        const dataFlowResponse = await fetch(`/api/schema/${selectedDatabase}/${selectedTable}`);
-        if (!dataFlowResponse.ok) {
-            throw new Error(`HTTP error! status: ${dataFlowResponse.status}`);
-        }
-        const dataFlowData = await dataFlowResponse.json();
-        currentDataFlowSchema = dataFlowData.schema;
-
-        // Load Relationships schema (new endpoint)
-        const relationshipsResponse = await fetch(`/api/relationships/${selectedDatabase}/${selectedTable}`);
-        if (!relationshipsResponse.ok) {
-            throw new Error(`HTTP error! status: ${relationshipsResponse.status}`);
-        }
-        const relationshipsData = await relationshipsResponse.json();
-        currentRelationshipsSchema = relationshipsData.schema;
-
-        // Render both schemas
-        renderDataFlowSchema();
-        renderRelationshipsSchema();
-    } catch (error) {
-        console.error('Error loading table schemas:', error);
-        showError('Failed to load table schemas.');
-    }
-}
-
-// Generate relationships schema (enhanced version of data flow)
-function generateRelationshipsSchema(dataFlowSchema) {
-    // For now, convert flowchart to ER diagram
-    // This is a placeholder - we'll enhance this with proper ER diagram generation
-    if (!dataFlowSchema) return '';
-    
-    // Convert flowchart to erDiagram
-    let relationshipsSchema = dataFlowSchema.replace('flowchart TB', 'erDiagram');
-    
-    // Basic conversion - this will be enhanced later with proper ER syntax
-    return relationshipsSchema;
-}
-
-// Render Data Flow schema
-function renderDataFlowSchema() {
-    if (!currentDataFlowSchema) return;
-
-    const formattedSchema = formatMermaidSchema(currentDataFlowSchema);
-    renderMermaidDiagramInContainer(dataflowDiagram, formattedSchema, 'dataflow');
-}
-
-// Render Relationships schema
-function renderRelationshipsSchema() {
-    if (!currentRelationshipsSchema) return;
-
-    const formattedSchema = formatMermaidSchema(currentRelationshipsSchema);
-    renderMermaidDiagramInContainer(relationshipsDiagram, formattedSchema, 'relationships');
-}
-
-// Enhanced mermaid diagram renderer for specific containers
-function renderMermaidDiagramInContainer(container, schema, type) {
-    if (!container || !schema) return;
-
-    container.innerHTML = '';
-
-    const mermaidContainer = document.createElement('div');
-    mermaidContainer.className = 'mermaid';
-    mermaidContainer.textContent = schema;
-    container.appendChild(mermaidContainer);
-
-    console.log(`Rendering ${type} Mermaid diagram with schema:`, schema);
-
-    try {
-        mermaid.initialize({
-            startOnLoad: false,
-            theme: 'default',
-            securityLevel: 'strict',
-            flowchart: {
-                useMaxWidth: true,
-                htmlLabels: true
-            },
-            er: {
-                diagramPadding: 20,
-                layoutDirection: 'TB',
-                minEntityWidth: 100,
-                minEntityHeight: 75,
-                entityPadding: 15
-            }
-        });
-
-        mermaid.init(undefined, mermaidContainer);
-        console.log(`${type} Mermaid initialization successful`);
-        
-        // Apply zoom based on section type
-        if (type === 'dataflow') {
-            applyDataFlowZoom();
-            setupMouseWheelZoomForSection(dataFlowSection, 'dataflow');
-        } else if (type === 'relationships') {
-            applyRelationshipsZoom();
-            setupMouseWheelZoomForSection(relationshipsSection, 'relationships');
-        }
-    } catch (error) {
-        console.error(`Error during ${type} Mermaid initialization:`, error);
-        showRawSchemaInContainer(container, schema);
-    }
-}
-
-// Show raw schema in specific container
-function showRawSchemaInContainer(container, schema) {
-    container.innerHTML = '';
-    const rawSchemaDisplay = document.createElement('pre');
-    rawSchemaDisplay.style.whiteSpace = 'pre-wrap';
-    rawSchemaDisplay.style.fontFamily = 'monospace';
-    rawSchemaDisplay.style.padding = '10px';
-    rawSchemaDisplay.style.border = '1px solid #ccc';
-    rawSchemaDisplay.textContent = schema;
-    container.appendChild(rawSchemaDisplay);
-}
-
-// Data Flow zoom functions
-function dataflowZoomIn() {
-    dataflowZoomLevel = Math.min(dataflowZoomLevel + 0.1, 20);
-    applyDataFlowZoom();
-}
-
-function dataflowZoomOut() {
-    dataflowZoomLevel = Math.max(dataflowZoomLevel - 0.1, 0.5);
-    applyDataFlowZoom();
-}
-
-function dataflowResetZoom() {
-    dataflowZoomLevel = 1;
-    applyDataFlowZoom();
-}
-
-function applyDataFlowZoom() {
-    if (dataflowDiagram) {
-        dataflowDiagram.style.transform = `scale(${dataflowZoomLevel})`;
-        dataflowDiagram.style.transformOrigin = 'top left';
-    }
-}
-
-// Relationships zoom functions
-function relationshipsZoomIn() {
-    relationshipsZoomLevel = Math.min(relationshipsZoomLevel + 0.1, 20);
-    applyRelationshipsZoom();
-}
-
-function relationshipsZoomOut() {
-    relationshipsZoomLevel = Math.max(relationshipsZoomLevel - 0.1, 0.5);
-    applyRelationshipsZoom();
-}
-
-function relationshipsResetZoom() {
-    relationshipsZoomLevel = 1;
-    applyRelationshipsZoom();
-}
-
-function applyRelationshipsZoom() {
-    if (relationshipsDiagram) {
-        relationshipsDiagram.style.transform = `scale(${relationshipsZoomLevel})`;
-        relationshipsDiagram.style.transformOrigin = 'top left';
-    }
-}
-
-// Setup mouse wheel zoom for specific section
-function setupMouseWheelZoomForSection(sectionContainer, sectionType) {
-    if (!sectionContainer) return;
-    
-    const diagramContainer = sectionType === 'dataflow' ? dataflowDiagram : relationshipsDiagram;
-    
-    sectionContainer.removeEventListener('wheel', handleMouseWheelForSection);
-    sectionContainer.addEventListener('wheel', (event) => handleMouseWheelForSection(event, sectionType), { passive: false });
-    
-    // Setup mouse drag scrolling
-    let isDragging = false;
-    let startX, startY, scrollLeft, scrollTop;
-    
-    sectionContainer.style.cursor = 'grab';
-    
-    sectionContainer.addEventListener('mousedown', (e) => {
-        // Don't drag if clicking on zoom controls
-        if (e.target.closest('.view-controls')) return;
-        
-        isDragging = true;
-        sectionContainer.style.cursor = 'grabbing';
-        startX = e.pageX - sectionContainer.offsetLeft;
-        startY = e.pageY - sectionContainer.offsetTop;
-        scrollLeft = sectionContainer.scrollLeft;
-        scrollTop = sectionContainer.scrollTop;
-        e.preventDefault();
-    });
-    
-    sectionContainer.addEventListener('mouseleave', () => {
-        isDragging = false;
-        sectionContainer.style.cursor = 'grab';
-    });
-    
-    sectionContainer.addEventListener('mouseup', () => {
-        isDragging = false;
-        sectionContainer.style.cursor = 'grab';
-    });
-    
-    sectionContainer.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        
-        e.preventDefault();
-        const x = e.pageX - sectionContainer.offsetLeft;
-        const y = e.pageY - sectionContainer.offsetTop;
-        
-        const moveX = (x - startX);
-        const moveY = (y - startY);
-        
-        sectionContainer.scrollLeft = scrollLeft - moveX;
-        sectionContainer.scrollTop = scrollTop - moveY;
-    });
-    
-    console.log(`Mouse wheel zoom and drag support set up for ${sectionType}`);
-}
-
-function handleMouseWheelForSection(event, sectionType) {
-    event.preventDefault();
-    
-    const delta = event.deltaY || event.detail || event.wheelDelta;
-    
-    if (sectionType === 'dataflow') {
-        if (delta < 0) {
-            dataflowZoomIn();
-        } else {
-            dataflowZoomOut();
-        }
-        console.log(`Data Flow zoom level: ${dataflowZoomLevel.toFixed(1)}`);
-    } else if (sectionType === 'relationships') {
-        if (delta < 0) {
-            relationshipsZoomIn();
-        } else {
-            relationshipsZoomOut();
-        }
-        console.log(`Relationships zoom level: ${relationshipsZoomLevel.toFixed(1)}`);
-    }
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${selectedDatabase}_${selectedTable}_schema.html`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, 100);
 }

@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClickHouse Schema Flow Visualizer</title>
+    <title>schemaflow / clickhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/static/css/styles.css">
     <link rel="icon" href="/static/img/favicon.ico" type="image/x-icon">
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
@@ -11,33 +14,62 @@
 </head>
 <body>
     <header>
-        <h1><i class="fa-solid fa-database"></i> ClickHouse Schema Flow Visualizer</h1>
+        <h1>
+            <span class="brand-mark" aria-hidden="true"></span>
+            schemaflow
+            <span class="brand-divider">/ clickhouse</span>
+        </h1>
+        <div class="header-spacer"></div>
+        <div class="header-search" role="search" aria-label="Search">
+            <span class="search-icon">⌕</span>
+            <span class="search-placeholder">Search tables, columns, engines…</span>
+            <kbd>⌘K</kbd>
+        </div>
+        <div class="connection-chip" title="Connection status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="conn-name" id="conn-name">clickhouse</span>
+            <span class="conn-port" id="conn-port">9000</span>
+        </div>
     </header>
 
     <main>
         <div class="container">
             <div class="sidebar">
+                <div class="sidebar-filter">
+                    <div class="filter-pill">
+                        <span>⌕</span>
+                        <span>filter tables…</span>
+                        <span style="flex:1"></span>
+                        <kbd>/</kbd>
+                    </div>
+                </div>
                 <div class="sidebar-header">
-                    <h2 class="collapsible-header" id="database-header">Databases & Tables <i class="fa-solid fa-chevron-down collapse-icon"></i></h2>
-                    <button id="refresh-btn" title="Refresh database list">↻</button>
+                    <h2 class="collapsible-header" id="database-header">
+                        <span>databases</span>
+                        <span class="db-count">· <span id="db-count">0</span></span>
+                    </h2>
+                    <button id="refresh-btn" title="Refresh database list" aria-label="Refresh">↻</button>
                 </div>
                 <div class="tree-container" id="database-tree-container">
                     <ul id="database-tree" class="tree-view"></ul>
                 </div>
                 <div class="legend-container">
-                    <h3 class="collapsible-header">Table Types <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+                    <h3 class="collapsible-header">
+                        engine types
+                        <i class="fa-solid fa-chevron-down collapse-icon"></i>
+                    </h3>
                     <ul class="table-types-legend">
-                        <li><i class="fa-solid fa-database"></i> MergeTree (Local)</li>
-                        <li><i class="fa-solid fa-circle-nodes"></i> Replicated</li>
-                        <li><i class="fa-solid fa-diagram-project"></i> Distributed</li>
-                        <li><i class="fa-solid fa-eye"></i> Materialized View</li>
-                        <li><i class="fa-solid fa-book"></i> Dictionary</li>
+                        <li><span class="glyph mergetree">▤</span> MergeTree</li>
+                        <li><span class="glyph replicated">◈</span> Replicated</li>
+                        <li><span class="glyph distributed">⋈</span> Distributed</li>
+                        <li><span class="glyph mview">◐</span> Materialized View</li>
+                        <li><span class="glyph dictionary">☱</span> Dictionary</li>
                     </ul>
                     <div class="metadata-toggle-container">
                         <label class="toggle-switch">
                             <input type="checkbox" id="metadata-toggle">
                             <span class="toggle-slider"></span>
-                            <span class="toggle-label">Show Metadata</span>
+                            <span class="toggle-label">show metadata</span>
                         </label>
                     </div>
                 </div>
@@ -45,7 +77,11 @@
 
             <div class="main-panel">
                 <div class="toolbar">
-                    <span id="current-selection"></span>
+                    <span id="current-selection">
+                        <span class="crumb-root">schema</span>
+                        <span class="crumb-sep">/</span>
+                        <span class="crumb-placeholder">select a table</span>
+                    </span>
                     <div class="export-buttons">
                         <button id="export-html-btn">Export HTML</button>
                     </div>
@@ -54,58 +90,62 @@
                     <div class="schema-sections">
                         <div class="section-tabs">
                             <button class="section-tab active" data-section="data-flow">
-                                <i class="fa-solid fa-flow"></i> Data Flow
+                                <i class="fa-solid fa-diagram-project"></i> Data Flow
                             </button>
                             <button class="section-tab" data-section="relationships">
-                                <i class="fa-solid fa-project-diagram"></i> Relationships
+                                <i class="fa-solid fa-share-nodes"></i> Relationships
                             </button>
                         </div>
-                        
+
                         <div class="schema-container" id="data-flow-section">
                             <div class="section-header">
-                                <h3><i class="fa-solid fa-flow"></i> Data Flow</h3>
-                                <p class="section-description">High-level table dependencies and data flow relationships</p>
+                                <div class="section-header-text">
+                                    <h3>Data flow</h3>
+                                    <p class="section-description">Upstream sources and downstream materializations for the selected table.</p>
+                                </div>
+                                <div class="view-controls">
+                                    <button id="dataflow-zoom-out-btn" title="Zoom out"><i>−</i></button>
+                                    <button id="dataflow-reset-zoom-btn" title="Reset zoom"><i>⤢</i></button>
+                                    <button id="dataflow-zoom-in-btn" title="Zoom in"><i>+</i></button>
+                                </div>
                             </div>
-                            <div class="view-controls">
-                                <button id="dataflow-zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
-                                <button id="dataflow-zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
-                                <button id="dataflow-reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                            <div class="diagram-scroll-area">
+                                <pre id="dataflow-diagram"></pre>
                             </div>
-                            <pre id="dataflow-diagram"></pre>
                         </div>
-                        
+
                         <div class="schema-container hidden" id="relationships-section">
                             <div class="section-header">
-                                <h3><i class="fa-solid fa-project-diagram"></i> Relationships</h3>
-                                <p class="section-description">Detailed column-level relationships and table structures</p>
+                                <div class="section-header-text">
+                                    <h3>Column relationships</h3>
+                                    <p class="section-description">Column-level mapping with transformation expressions on each edge.</p>
+                                </div>
+                                <div class="view-controls">
+                                    <button id="relationships-zoom-out-btn" title="Zoom out"><i>−</i></button>
+                                    <button id="relationships-reset-zoom-btn" title="Reset zoom"><i>⤢</i></button>
+                                    <button id="relationships-zoom-in-btn" title="Zoom in"><i>+</i></button>
+                                </div>
                             </div>
-                            <div class="view-controls">
-                                <button id="relationships-zoom-in-btn" title="Zoom in"><i class="icon-zoom-in">+</i></button>
-                                <button id="relationships-zoom-out-btn" title="Zoom out"><i class="icon-zoom-out">-</i></button>
-                                <button id="relationships-reset-zoom-btn" title="Reset zoom"><i class="icon-reset">↺</i></button>
+                            <div class="diagram-scroll-area">
+                                <pre id="relationships-diagram"></pre>
                             </div>
-                            <pre id="relationships-diagram"></pre>
                         </div>
                     </div>
                     <div class="table-details-container">
                         <div class="table-details-header">
-                            <h3><i class="fa-solid fa-table"></i> Table Details</h3>
+                            <h3>Table details</h3>
                             <button id="toggle-table-details" title="Toggle table details">
                                 <i class="fa-solid fa-chevron-right"></i>
                             </button>
                         </div>
                         <div id="table-details" class="table-details-content">
-                            <p class="no-table-selected">Select a table to view its details</p>
+                            <p class="no-table-selected">Select a table from the sidebar to view its details.</p>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
     </main>
-
-    <footer>
-        <p>ClickHouse Schema Flow Visualizer</p>
-    </footer>
 
     <script src="/static/js/app.js"></script>
 </body>
