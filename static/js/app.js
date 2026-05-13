@@ -6,30 +6,21 @@ function escapeHtml(str) {
 }
 
 const ENGINE_TYPES = {
-    mergetree:   { icon: 'fa-database',         name: 'MergeTree',         glyph: '▤' },
-    replicated:  { icon: 'fa-circle-nodes',     name: 'Replicated',        glyph: '◈' },
-    distributed: { icon: 'fa-diagram-project',  name: 'Distributed',       glyph: '⋈' },
-    mview:       { icon: 'fa-eye',              name: 'MaterializedView',  glyph: '◐' },
-    dictionary:  { icon: 'fa-book',             name: 'Dictionary',        glyph: '☱' },
+    mergetree:   { name: 'MergeTree' },
+    replicated:  { name: 'Replicated' },
+    distributed: { name: 'Distributed' },
+    mview:       { name: 'MaterializedView' },
+    dictionary:  { name: 'Dictionary' },
 };
 
 function classifyEngine(engineName) {
     if (!engineName) return 'mergetree';
-    const e = engineName.toLowerCase();
-    if (e === 'distributed') return 'distributed';
-    if (e === 'materializedview') return 'mview';
-    if (e.startsWith('dictionary')) return 'dictionary';
-    if (e.startsWith('replicated')) return 'replicated';
+    const e = engineName;
+    if (e === 'Distributed') return 'distributed';
+    if (e === 'MaterializedView') return 'mview';
+    if (e.startsWith('Dictionary')) return 'dictionary';
+    if (e.startsWith('Replicated')) return 'replicated';
     return 'mergetree';
-}
-
-function classifyFromIconClassList(classList) {
-    for (const cls of classList) {
-        for (const [key, v] of Object.entries(ENGINE_TYPES)) {
-            if (cls === v.icon) return key;
-        }
-    }
-    return null;
 }
 
 function formatRows(rows) {
@@ -50,88 +41,53 @@ function formatBytes(bytes) {
 }
 
 // ─── DOM references ──────────────────────────────────────────────────────
-const databaseTree       = document.getElementById('database-tree');
-const refreshBtn         = document.getElementById('refresh-btn');
-const currentSelection   = document.getElementById('current-selection');
-const dataflowDiagram    = document.getElementById('dataflow-diagram');
+const databaseTree         = document.getElementById('database-tree');
+const refreshBtn           = document.getElementById('refresh-btn');
+const currentSelection     = document.getElementById('current-selection');
+const dataflowDiagram      = document.getElementById('dataflow-diagram');
 const relationshipsDiagram = document.getElementById('relationships-diagram');
-const exportHtmlBtn      = document.getElementById('export-html-btn');
-const dbCountEl          = document.getElementById('db-count');
+const exportHtmlBtn        = document.getElementById('export-html-btn');
+const dbCountEl            = document.getElementById('db-count');
 
-const dataflowZoomInBtn      = document.getElementById('dataflow-zoom-in-btn');
-const dataflowZoomOutBtn     = document.getElementById('dataflow-zoom-out-btn');
-const dataflowResetZoomBtn   = document.getElementById('dataflow-reset-zoom-btn');
-const relationshipsZoomInBtn    = document.getElementById('relationships-zoom-in-btn');
-const relationshipsZoomOutBtn   = document.getElementById('relationships-zoom-out-btn');
+const dataflowZoomInBtn       = document.getElementById('dataflow-zoom-in-btn');
+const dataflowZoomOutBtn      = document.getElementById('dataflow-zoom-out-btn');
+const dataflowResetZoomBtn    = document.getElementById('dataflow-reset-zoom-btn');
+const relationshipsZoomInBtn  = document.getElementById('relationships-zoom-in-btn');
+const relationshipsZoomOutBtn = document.getElementById('relationships-zoom-out-btn');
 const relationshipsResetZoomBtn = document.getElementById('relationships-reset-zoom-btn');
 
-const sectionTabs           = document.querySelectorAll('.section-tab');
-const dataFlowSection       = document.getElementById('data-flow-section');
-const relationshipsSection  = document.getElementById('relationships-section');
+const sectionTabs          = document.querySelectorAll('.section-tab');
+const dataFlowSection      = document.getElementById('data-flow-section');
+const relationshipsSection = document.getElementById('relationships-section');
 
 const tableDetailsContainer = document.querySelector('.table-details-container');
 const tableDetailsContent   = document.getElementById('table-details');
-const toggleTableDetailsBtn = document.getElementById('toggle-table-details');
 
 // ─── State ───────────────────────────────────────────────────────────────
 let databases = [];
 let selectedDatabase = null;
 let selectedTable = null;
-let currentDataFlowSchema = null;
-let currentRelationshipsSchema = null;
+let currentDataFlowGraph = null;
+let currentRelationshipsGraph = null;
 let currentActiveSection = 'data-flow';
-let dataflowZoomLevel = 1;
-let relationshipsZoomLevel = 1;
 
-// ─── Mermaid theming ─────────────────────────────────────────────────────
-const MERMAID_THEME = {
-    startOnLoad: false,
-    securityLevel: 'loose', // needed so embedded <i> icons in node labels render
-    theme: 'base',
-    themeVariables: {
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-        fontSize: '12px',
-        background: '#fafafa',
-        primaryColor: '#ffffff',
-        primaryTextColor: '#0b0d12',
-        primaryBorderColor: '#e8e8ea',
-        lineColor: '#cbd0d8',
-        secondaryColor: '#ffffff',
-        tertiaryColor: '#ffffff',
-        nodeBorder: '#e8e8ea',
-        clusterBkg: '#ffffff',
-        clusterBorder: '#e8e8ea',
-        edgeLabelBackground: '#ffffff',
-    },
-    flowchart: {
-        useMaxWidth: false,
-        htmlLabels: true,
-        curve: 'basis',
-        padding: 16,
-        nodeSpacing: 24,
-        rankSpacing: 44,
-    },
-};
+let dataflowPanzoom = null;
+let relationshipsPanzoom = null;
 
 // ─── Boot ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    if (typeof mermaid !== 'undefined') {
-        mermaid.initialize(MERMAID_THEME);
-        console.log('Mermaid initialized');
-    }
-
     loadDatabases();
 
     refreshBtn.addEventListener('click', loadDatabases);
     exportHtmlBtn.addEventListener('click', exportHtml);
 
-    dataflowZoomInBtn.addEventListener('click', dataflowZoomIn);
-    dataflowZoomOutBtn.addEventListener('click', dataflowZoomOut);
-    dataflowResetZoomBtn.addEventListener('click', dataflowResetZoom);
+    dataflowZoomInBtn.addEventListener('click',    () => dataflowPanzoom && dataflowPanzoom.zoomIn());
+    dataflowZoomOutBtn.addEventListener('click',   () => dataflowPanzoom && dataflowPanzoom.zoomOut());
+    dataflowResetZoomBtn.addEventListener('click', () => dataflowPanzoom && dataflowPanzoom.reset());
 
-    relationshipsZoomInBtn.addEventListener('click', relationshipsZoomIn);
-    relationshipsZoomOutBtn.addEventListener('click', relationshipsZoomOut);
-    relationshipsResetZoomBtn.addEventListener('click', relationshipsResetZoom);
+    relationshipsZoomInBtn.addEventListener('click',    () => relationshipsPanzoom && relationshipsPanzoom.zoomIn());
+    relationshipsZoomOutBtn.addEventListener('click',   () => relationshipsPanzoom && relationshipsPanzoom.zoomOut());
+    relationshipsZoomResetIfAny();
 
     sectionTabs.forEach((tab) => {
         tab.addEventListener('click', () => switchSection(tab.dataset.section));
@@ -181,6 +137,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+function relationshipsZoomResetIfAny() {
+    relationshipsResetZoomBtn.addEventListener('click', () => relationshipsPanzoom && relationshipsPanzoom.reset());
+}
+
 // ─── Data loading ────────────────────────────────────────────────────────
 async function loadDatabases() {
     try {
@@ -198,7 +158,6 @@ function renderDatabaseTree() {
     databaseTree.innerHTML = '';
 
     let dbList = [];
-
     if (typeof databases === 'object' && !Array.isArray(databases)) {
         dbList = Object.entries(databases).map(([name, content]) => ({
             name,
@@ -246,44 +205,6 @@ function renderDatabaseTree() {
     });
 }
 
-// Map of "database.table" → engine key, populated as the sidebar renders.
-// Used by the diagram decorator to apply per-engine rail colors.
-const tableEngineMap = new Map();
-
-function detectEngineFromIconHtml(html) {
-    if (typeof html !== 'string') return null;
-    if (html.includes('fa-database'))        return 'mergetree';
-    if (html.includes('fa-circle-nodes'))    return 'replicated';
-    if (html.includes('fa-diagram-project')) return 'distributed';
-    if (html.includes('fa-eye'))             return 'mview';
-    if (html.includes('fa-book'))            return 'dictionary';
-    // The backend uses fa-table as a default fallback for non-matched engines
-    // (e.g., SummingMergeTree, AggregatingMergeTree). Treat as MergeTree family.
-    if (html.includes('fa-table'))           return 'mergetree';
-    return null;
-}
-
-// Find an engine key by matching the rendered node text against the registered
-// "db.table" map. Mermaid concatenates the label with the <small> metadata
-// (e.g., "aggregated.cnx_6minRows: 358.2M …"), so we (a) chop off the metadata
-// suffix at "Rows:" / "Size:" if present, then (b) try direct lookup, then
-// (c) fall back to a longest-prefix scan of the map for cases that include
-// trailing chars.
-function lookupEngineByLabel(text) {
-    const raw = (text || '').replace(/\s+/g, ' ').trim();
-    if (!raw || !tableEngineMap.size) return null;
-
-    const stripped = raw.split(/\s*(?:Rows:|Size:)/)[0].trim();
-    if (tableEngineMap.has(stripped)) return tableEngineMap.get(stripped);
-
-    let bestKey = null;
-    for (const key of tableEngineMap.keys()) {
-        if (!stripped.startsWith(key) && !raw.startsWith(key)) continue;
-        if (!bestKey || key.length > bestKey.length) bestKey = key;
-    }
-    return bestKey ? tableEngineMap.get(bestKey) : null;
-}
-
 function addTableToList(tablesList, dbName, dbTable, showHtml) {
     const tableItem = document.createElement('li');
     tableItem.className = 'table';
@@ -296,12 +217,6 @@ function addTableToList(tablesList, dbName, dbTable, showHtml) {
     tableItem.dataset.database = dbName;
     tableItem.dataset.table = dbTable;
     tableItem.title = dbTable;
-
-    const engineKey = detectEngineFromIconHtml(iconHtml);
-    if (engineKey) {
-        tableEngineMap.set(`${dbName}.${dbTable}`, engineKey);
-        tableItem.dataset.engine = engineKey;
-    }
 
     tableItem.addEventListener('click', () => selectTable(tableItem));
 
@@ -323,12 +238,30 @@ async function selectTable(tableItem) {
     selectedDatabase = tableItem.dataset.database;
     selectedTable = tableItem.dataset.table;
 
-    dataflowZoomLevel = 1;
-    relationshipsZoomLevel = 1;
-
     renderBreadcrumb({ database: selectedDatabase, table: selectedTable, engine: null });
 
-    await Promise.all([loadTableSchemas(), loadTableDetails(selectedDatabase, selectedTable)]);
+    await Promise.all([loadTableGraphs(), loadTableDetails(selectedDatabase, selectedTable)]);
+}
+
+function selectTableByID(id) {
+    if (!id) return;
+    const item = document.querySelector(`.tree-view .table[data-database="${cssEscape(id.split('.')[0])}"][data-table="${cssEscape(id.split('.').slice(1).join('.'))}"]`);
+    if (item) {
+        // ensure the parent db is expanded
+        const dbLi = item.closest('li').parentElement.closest('li');
+        if (dbLi) {
+            const dbSpan = dbLi.querySelector(':scope > .database');
+            const ul = dbLi.querySelector(':scope > ul');
+            if (dbSpan && ul && ul.style.display === 'none') toggleDatabase(dbLi, dbSpan);
+        }
+        item.scrollIntoView({ block: 'nearest' });
+        selectTable(item);
+    }
+}
+
+function cssEscape(s) {
+    if (window.CSS && CSS.escape) return CSS.escape(s);
+    return String(s).replace(/["'\\]/g, '\\$&');
 }
 
 function renderBreadcrumb({ database, table, engine }) {
@@ -350,7 +283,7 @@ function renderBreadcrumb({ database, table, engine }) {
     `;
 }
 
-// ─── Section switching + zoom ────────────────────────────────────────────
+// ─── Section switching ───────────────────────────────────────────────────
 function switchSection(sectionName) {
     sectionTabs.forEach((tab) => {
         tab.classList.toggle('active', tab.dataset.section === sectionName);
@@ -367,235 +300,41 @@ function switchSection(sectionName) {
     localStorage.setItem('activeSection', sectionName);
 }
 
-function dataflowZoomIn()    { dataflowZoomLevel = Math.min(dataflowZoomLevel + 0.1, 4); applyDataFlowZoom(); }
-function dataflowZoomOut()   { dataflowZoomLevel = Math.max(dataflowZoomLevel - 0.1, 0.5); applyDataFlowZoom(); }
-function dataflowResetZoom() { dataflowZoomLevel = 1; applyDataFlowZoom(); }
-function applyDataFlowZoom() {
-    if (dataflowDiagram) dataflowDiagram.style.transform = `scale(${dataflowZoomLevel})`;
-}
-
-function relationshipsZoomIn()    { relationshipsZoomLevel = Math.min(relationshipsZoomLevel + 0.1, 4); applyRelationshipsZoom(); }
-function relationshipsZoomOut()   { relationshipsZoomLevel = Math.max(relationshipsZoomLevel - 0.1, 0.5); applyRelationshipsZoom(); }
-function relationshipsResetZoom() { relationshipsZoomLevel = 1; applyRelationshipsZoom(); }
-function applyRelationshipsZoom() {
-    if (relationshipsDiagram) relationshipsDiagram.style.transform = `scale(${relationshipsZoomLevel})`;
-}
-
-// ─── Schema loading ──────────────────────────────────────────────────────
-async function loadTableSchemas() {
+// ─── Graph loading + rendering ───────────────────────────────────────────
+async function loadTableGraphs() {
     if (!selectedDatabase || !selectedTable) return;
-
     try {
         const [flowResp, relResp] = await Promise.all([
-            fetch(`/api/schema/${selectedDatabase}/${selectedTable}`),
+            fetch(`/api/dataflow/${selectedDatabase}/${selectedTable}`),
             fetch(`/api/relationships/${selectedDatabase}/${selectedTable}`),
         ]);
         if (!flowResp.ok) throw new Error(`Data Flow: HTTP ${flowResp.status}`);
-        if (!relResp.ok) throw new Error(`Relationships: HTTP ${relResp.status}`);
 
-        const flowData = await flowResp.json();
-        const relData  = await relResp.json();
+        currentDataFlowGraph = await flowResp.json();
+        currentRelationshipsGraph = relResp.ok ? await relResp.json() : { tables: [], edges: [] };
 
-        currentDataFlowSchema      = flowData.schema;
-        currentRelationshipsSchema = relData.schema;
-
-        renderDataFlowSchema();
-        renderRelationshipsSchema();
+        renderDataFlow();
+        renderRelationships();
     } catch (error) {
-        console.error('Error loading schemas:', error);
-        showError('Failed to load table schemas.');
+        console.error('Error loading graphs:', error);
+        showError('Failed to load table graphs.');
     }
 }
 
-function renderDataFlowSchema() {
-    if (!currentDataFlowSchema) return;
-    renderMermaidDiagramInContainer(dataflowDiagram, currentDataFlowSchema, 'dataflow');
-}
-
-function renderRelationshipsSchema() {
-    if (!currentRelationshipsSchema) return;
-    renderMermaidDiagramInContainer(relationshipsDiagram, currentRelationshipsSchema, 'relationships');
-}
-
-async function renderMermaidDiagramInContainer(container, schema, type) {
-    if (!container || !schema) return;
-    container.innerHTML = '';
-
-    const mermaidContainer = document.createElement('div');
-    mermaidContainer.className = 'mermaid';
-    mermaidContainer.textContent = schema;
-    container.appendChild(mermaidContainer);
-
-    if (typeof mermaid === 'undefined') {
-        const id = setInterval(() => {
-            if (typeof mermaid !== 'undefined') {
-                clearInterval(id);
-                renderMermaidDiagramInContainer(container, schema, type);
-            }
-        }, 100);
-        return;
-    }
-
-    try {
-        mermaid.initialize(MERMAID_THEME);
-        await mermaid.run({ nodes: [mermaidContainer] });
-        decorateMermaidNodes(mermaidContainer);
-
-        if (type === 'dataflow') {
-            applyDataFlowZoom();
-            setupMouseWheelZoomForSection(dataFlowSection, 'dataflow');
-        } else {
-            applyRelationshipsZoom();
-            setupMouseWheelZoomForSection(relationshipsSection, 'relationships');
-        }
-    } catch (error) {
-        console.error(`Error rendering ${type} diagram:`, error);
-        showRawSchemaInContainer(container, schema);
-    }
-}
-
-// ─── Colored rail injection (Variant A node style) ───────────────────────
-// After Mermaid renders, walk each .node, detect engine type from the embedded
-// Font Awesome icon, and prepend a 3px colored rect along the left edge.
-function decorateMermaidNodes(root) {
-    if (!root) return;
-    const svg = root.querySelector('svg');
-    if (!svg) return;
-
-    // ensure SVG fills container width naturally
-    svg.style.maxWidth = '100%';
-    svg.removeAttribute('style');
-
-    const nodes = svg.querySelectorAll('g.node');
-    nodes.forEach((node) => {
-        // Skip cluster/subgraph headers
-        if (node.classList.contains('cluster')) return;
-
-        // Detect engine type from contained <i> icon classes (only present in some
-        // rendering paths) — fall back to a name lookup populated from the sidebar.
-        let engineKey = null;
-        node.querySelectorAll('i').forEach((iconEl) => {
-            if (engineKey) return;
-            const k = classifyFromIconClassList(iconEl.classList);
-            if (k) engineKey = k;
-        });
-        if (!engineKey) {
-            engineKey = lookupEngineByLabel(node.textContent || '');
-        }
-
-        // Find the principal shape (first rect/polygon/circle/ellipse in this node)
-        const shape = node.querySelector('rect, polygon, circle, ellipse');
-        if (!shape) return;
-
-        // Detect "current" node by the backend's hardcoded orange fill (#FF6D00)
-        const inlineStyle = shape.getAttribute('style') || '';
-        const fillAttr = shape.getAttribute('fill') || '';
-        const isCurrent =
-            inlineStyle.includes('#FF6D00') || inlineStyle.includes('#ff6d00')
-            || inlineStyle.includes('rgb(255, 109, 0)') || inlineStyle.includes('rgb(255,109,0)')
-            || fillAttr.toLowerCase() === '#ff6d00';
-
-        // Strip the backend's hardcoded orange/purple !important inline styles so our
-        // theme can apply. We re-style "current" nodes via the .current class hook.
-        if (isCurrent) {
-            shape.removeAttribute('style');
-            shape.removeAttribute('fill');
-            shape.removeAttribute('stroke');
-            // Backend also writes color:#FFFFFF on label foreignObject content — drop it
-            // so labels stay visible on the white card.
-            node.querySelectorAll('[style]').forEach((el) => {
-                const s = el.getAttribute('style') || '';
-                if (/#FF6D00|#ff6d00|#AA00FF|#aa00ff|#FFFFFF|rgb\(255,\s*255,\s*255\)/.test(s)) {
-                    el.removeAttribute('style');
-                }
-            });
-        } else if (inlineStyle.includes('!important')) {
-            shape.removeAttribute('style');
-        }
-
-        // Apply engine + current class hooks (used by CSS rules)
-        if (engineKey) node.classList.add(`engine-${engineKey}`);
-        if (isCurrent) node.classList.add('current');
-
-        // For rects only, inject the colored rail on the left edge
-        if (shape.tagName.toLowerCase() === 'rect') {
-            // Avoid double-inject on re-renders
-            if (node.querySelector('.rail-bar')) return;
-
-            const x = parseFloat(shape.getAttribute('x')) || 0;
-            const y = parseFloat(shape.getAttribute('y')) || 0;
-            const h = parseFloat(shape.getAttribute('height')) || 0;
-            const rx = parseFloat(shape.getAttribute('rx')) || 0;
-
-            const rail = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            rail.setAttribute('class', 'rail-bar');
-            rail.setAttribute('x', x);
-            rail.setAttribute('y', y);
-            rail.setAttribute('width', '3');
-            rail.setAttribute('height', h);
-            if (rx) rail.setAttribute('rx', Math.min(rx, 2));
-            // Insert just after the principal shape so it draws above the body
-            shape.parentNode.insertBefore(rail, shape.nextSibling);
-        }
+function renderDataFlow() {
+    if (!window.SchemaDiagram) return;
+    const result = window.SchemaDiagram.renderDataFlow(dataflowDiagram, currentDataFlowGraph, {
+        onNodeClick: (id) => selectTableByID(id),
     });
+    dataflowPanzoom = result ? result.panzoom : null;
 }
 
-function showRawSchemaInContainer(container, schema) {
-    container.innerHTML = '';
-    const raw = document.createElement('pre');
-    raw.style.whiteSpace = 'pre-wrap';
-    raw.style.fontFamily = 'inherit';
-    raw.style.padding = '12px';
-    raw.style.border = '1px solid var(--border)';
-    raw.style.borderRadius = '6px';
-    raw.style.background = '#fff';
-    raw.textContent = schema;
-    container.appendChild(raw);
-}
-
-// ─── Pan + wheel zoom ────────────────────────────────────────────────────
-function setupMouseWheelZoomForSection(sectionContainer, sectionType) {
-    if (!sectionContainer) return;
-    const scrollArea = sectionContainer.querySelector('.diagram-scroll-area');
-    if (!scrollArea || scrollArea.dataset.zoomBound === '1') {
-        return;
-    }
-    scrollArea.dataset.zoomBound = '1';
-
-    scrollArea.addEventListener('wheel', (event) => {
-        if (!event.ctrlKey && !event.metaKey) return; // only zoom with Ctrl/Cmd
-        event.preventDefault();
-        const delta = event.deltaY;
-        if (sectionType === 'dataflow') {
-            if (delta < 0) dataflowZoomIn(); else dataflowZoomOut();
-        } else {
-            if (delta < 0) relationshipsZoomIn(); else relationshipsZoomOut();
-        }
-    }, { passive: false });
-
-    let isDragging = false;
-    let startX, startY, scrollLeft, scrollTop;
-
-    scrollArea.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return;
-        isDragging = true;
-        scrollArea.style.cursor = 'grabbing';
-        startX = e.pageX - scrollArea.offsetLeft;
-        startY = e.pageY - scrollArea.offsetTop;
-        scrollLeft = scrollArea.scrollLeft;
-        scrollTop = scrollArea.scrollTop;
-        e.preventDefault();
+function renderRelationships() {
+    if (!window.SchemaDiagram) return;
+    const result = window.SchemaDiagram.renderRelationships(relationshipsDiagram, currentRelationshipsGraph, {
+        onTableClick: (id) => selectTableByID(id),
     });
-    scrollArea.addEventListener('mouseleave', () => { isDragging = false; scrollArea.style.cursor = 'grab'; });
-    scrollArea.addEventListener('mouseup', () => { isDragging = false; scrollArea.style.cursor = 'grab'; });
-    scrollArea.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        e.preventDefault();
-        const x = e.pageX - scrollArea.offsetLeft;
-        const y = e.pageY - scrollArea.offsetTop;
-        scrollArea.scrollLeft = scrollLeft - (x - startX);
-        scrollArea.scrollTop  = scrollTop  - (y - startY);
-    });
+    relationshipsPanzoom = result ? result.panzoom : null;
 }
 
 // ─── Toggles ─────────────────────────────────────────────────────────────
@@ -617,7 +356,7 @@ function toggleTableDetails() {
     localStorage.setItem('tableDetailsVisible', isVisible);
 }
 
-// ─── Table details panel ────────────────────────────────────────────────
+// ─── Table details panel ─────────────────────────────────────────────────
 async function loadTableDetails(database, table) {
     if (!database || !table) return;
     try {
@@ -688,64 +427,60 @@ function showTableDetailsError(message) {
 
 function showError(message) {
     console.error(message);
-    // Lightweight non-blocking notice; alert kept as last-resort fallback
     alert(message);
 }
 
 // ─── Export HTML ─────────────────────────────────────────────────────────
+// Embed the rendered SVG directly so the exported file has zero external
+// dependencies (no CDN, no Mermaid, no Dagre).
 function exportHtml() {
-    const schema = currentActiveSection === 'data-flow'
-        ? currentDataFlowSchema
-        : currentRelationshipsSchema;
-
-    if (!schema) {
-        showError('No schema to export. Select a table first.');
+    if (!selectedDatabase || !selectedTable) {
+        showError('No table selected.');
         return;
     }
+    const sourceDiagram = currentActiveSection === 'data-flow' ? dataflowDiagram : relationshipsDiagram;
+    const svg = sourceDiagram.querySelector('svg');
+    if (!svg) {
+        showError('Nothing to export yet — wait for the diagram to render.');
+        return;
+    }
+
+    // Inline a clone with computed styles preserved via a <style> block.
+    const clone = svg.cloneNode(true);
+    // The viewport's transform was used for pan/zoom. Reset for the export.
+    const viewport = clone.querySelector('.viewport');
+    if (viewport) viewport.removeAttribute('transform');
+
+    const wrapStyles = `
+:root { --accent:#3b5bdb; --border:#e8e8ea; --bg:#fafafa; --text:#0b0d12; --muted:#6b7280; --faint:#9aa0aa;
+  --t-mergetree-fg:#1f6feb; --t-replicated-fg:#d97706; --t-distributed-fg:#0d9488; --t-mview-fg:#a855f7; --t-dictionary-fg:#b48a00; }
+*, *::before, *::after { box-sizing: border-box; }
+body { margin:0; font-family:'JetBrains Mono', ui-monospace, monospace; background:var(--bg); color:var(--text); }
+header { padding:14px 20px; border-bottom:1px solid var(--border); background:#fff; }
+header h1 { margin:0; font-size:13px; font-weight:600; }
+header .crumb { font-size:11px; color:var(--muted); margin-top:4px; }
+.canvas { padding:24px; min-height:calc(100vh - 56px);
+  background-image: radial-gradient(circle, #d8dadf 1px, transparent 1px); background-size: 20px 20px; }
+svg { width:100%; height:auto; max-height:calc(100vh - 110px); }
+${commonDiagramCss()}
+`;
 
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${escapeHtml(selectedDatabase || '')} / ${escapeHtml(selectedTable || '')} — schemaflow</title>
+<title>${escapeHtml(selectedDatabase)} / ${escapeHtml(selectedTable)} — schemaflow</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap">
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" crossorigin="anonymous" defer><\/script>
-<style>
-  :root { --accent:#3b5bdb; --border:#e8e8ea; --bg:#fafafa; --text:#0b0d12; --muted:#6b7280; }
-  *, *::before, *::after { box-sizing: border-box; }
-  body { margin:0; font-family:'JetBrains Mono', ui-monospace, monospace; background:var(--bg); color:var(--text); }
-  header { padding:14px 20px; border-bottom:1px solid var(--border); background:#fff; }
-  header h1 { margin:0; font-size:13px; font-weight:600; }
-  header .crumb { font-size:11px; color:var(--muted); margin-top:4px; }
-  .canvas { padding:24px; min-height:calc(100vh - 56px); background-image: radial-gradient(circle, #d8dadf 1px, transparent 1px); background-size: 20px 20px; display:flex; justify-content:center; }
-  .mermaid { font-family: inherit; }
-  .mermaid .node rect { fill:#fff !important; stroke:var(--border) !important; }
-  .mermaid .edgePath .path { stroke:#cbd0d8 !important; }
-</style>
+<style>${wrapStyles}</style>
 </head>
 <body>
 <header>
   <h1>${escapeHtml(selectedDatabase)} / ${escapeHtml(selectedTable)}</h1>
   <div class="crumb">schemaflow · ${currentActiveSection === 'data-flow' ? 'Data Flow' : 'Column Relationships'}</div>
 </header>
-<div class="canvas"><pre class="mermaid">${escapeHtml(schema)}</pre></div>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  if (typeof mermaid === 'undefined') return;
-  mermaid.initialize({
-    startOnLoad: true,
-    theme: 'base',
-    themeVariables: {
-      fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-      primaryColor: '#ffffff', primaryTextColor: '#0b0d12',
-      primaryBorderColor: '#e8e8ea', lineColor: '#cbd0d8'
-    },
-    flowchart: { curve: 'basis', nodeSpacing: 24, rankSpacing: 44 }
-  });
-});
-<\/script>
+<div class="canvas">${new XMLSerializer().serializeToString(clone)}</div>
 </body>
 </html>`;
 
@@ -753,11 +488,44 @@ document.addEventListener('DOMContentLoaded', function() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${selectedDatabase}_${selectedTable}_schema.html`;
+    a.download = `${selectedDatabase}_${selectedTable}_${currentActiveSection}.html`;
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }, 100);
+}
+
+// Subset of diagram CSS that the exported HTML needs to stand alone.
+function commonDiagramCss() {
+    return `
+.df-halo, .rel-halo { fill:none; stroke:var(--accent); stroke-opacity:.18; stroke-width:3; }
+.df-card, .rel-card { fill:#fff; stroke:var(--border); stroke-width:1; }
+.df-node.current .df-card, .rel-table.current .rel-card { stroke:var(--accent); stroke-width:1.6; }
+.df-rail, .rel-rail { fill:var(--border); }
+.df-node.engine-mergetree .df-rail, .rel-table.engine-mergetree .rel-rail { fill:var(--t-mergetree-fg); }
+.df-node.engine-replicated .df-rail, .rel-table.engine-replicated .rel-rail { fill:var(--t-replicated-fg); }
+.df-node.engine-distributed .df-rail, .rel-table.engine-distributed .rel-rail { fill:var(--t-distributed-fg); }
+.df-node.engine-mview .df-rail, .rel-table.engine-mview .rel-rail { fill:var(--t-mview-fg); }
+.df-node.engine-dictionary .df-rail, .rel-table.engine-dictionary .rel-rail { fill:var(--t-dictionary-fg); }
+.df-node.current .df-rail, .rel-table.current .rel-rail { fill:var(--accent); }
+.df-title { font: 600 11.5px 'JetBrains Mono', monospace; fill:var(--text); }
+.df-sub   { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--faint); }
+.df-meta  { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
+.df-pin   { fill:var(--accent); }
+.df-pin-text { font: 700 9px 'JetBrains Mono', monospace; fill:#fff; }
+.df-edge { fill:none; stroke:#cbd0d8; stroke-width:1; }
+.df-edge.active { stroke:var(--accent); stroke-width:1.4; }
+.rel-role { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--faint); }
+.rel-name { font: 700 12px 'JetBrains Mono', monospace; fill:var(--text); }
+.rel-engine { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
+.rel-divider { stroke:var(--border); stroke-width:.5; }
+.rel-col-bg { fill:var(--bg); }
+.rel-col-name { font: 400 11px 'JetBrains Mono', monospace; fill:var(--text); }
+.rel-col-type { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
+.rel-edge { fill:none; stroke:var(--accent); stroke-opacity:.5; stroke-width:1.4; }
+.rel-edge-label rect { fill:#fff; stroke:var(--border); }
+.rel-edge-label text { font: 500 10px 'JetBrains Mono', monospace; fill:var(--accent); }
+`;
 }

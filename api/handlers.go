@@ -24,8 +24,8 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	api := router.Group("/api")
 	{
 		api.GET("/databases", h.GetDatabases)
-		api.GET("/schema/:database/:table", h.GetTableSchema)
-		api.GET("/relationships/:database/:table", h.GetTableRelationships)
+		api.GET("/dataflow/:database/:table", h.GetDataFlowGraph)
+		api.GET("/relationships/:database/:table", h.GetRelationshipsGraph)
 		api.GET("/table/:database/:table", h.GetTableDetails)
 	}
 }
@@ -45,29 +45,29 @@ func (h *Handler) GetDatabases(c *gin.Context) {
 	c.JSON(http.StatusOK, databases)
 }
 
-// GetTableSchema returns a Mermaid schema for the selected table
-func (h *Handler) GetTableSchema(c *gin.Context) {
+// GetDataFlowGraph returns a structured DAG of upstream/downstream tables for
+// the selected table. The frontend lays this out with Dagre and renders it as SVG.
+func (h *Handler) GetDataFlowGraph(c *gin.Context) {
 	database := c.Param("database")
 	table := c.Param("table")
 
 	if database == "" || table == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
-
 		return
 	}
 
-	schema, err := h.clickhouse.GenerateMermaidSchema(database, table)
+	graph, err := h.clickhouse.BuildDataFlowGraph(database, table)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"schema": schema})
+	c.JSON(http.StatusOK, graph)
 }
 
-// GetTableRelationships returns a detailed ER diagram schema for the selected table
-func (h *Handler) GetTableRelationships(c *gin.Context) {
+// GetRelationshipsGraph returns a column-level graph for the selected table, with
+// edges carrying transformation expressions where the backend can infer them.
+func (h *Handler) GetRelationshipsGraph(c *gin.Context) {
 	database := c.Param("database")
 	table := c.Param("table")
 
@@ -76,13 +76,13 @@ func (h *Handler) GetTableRelationships(c *gin.Context) {
 		return
 	}
 
-	schema, err := h.clickhouse.GenerateRelationshipsSchema(database, table)
+	graph, err := h.clickhouse.BuildRelationshipsGraph(database, table)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"schema": schema})
+	c.JSON(http.StatusOK, graph)
 }
 
 // GetTableDetails returns detailed information about the selected table

@@ -668,106 +668,167 @@ main { overflow: hidden; }
   transform-origin: top center;
 }
 
-/* ─── Mermaid theming ────────────────────────────────────────────────────── */
-.mermaid {
-  font-family: var(--font-mono) !important;
+/* ─── Diagram canvas + SVG renderer (Dagre + custom SVG) ─────────────────── */
+.diagram-canvas {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
 }
 
-.mermaid svg {
-  background: transparent !important;
-  font-family: var(--font-mono) !important;
+.flow-svg {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  display: block;
+  background: transparent;
+  font-family: var(--font-mono);
+  user-select: none;
 }
 
-/* Node base — white card with subtle border, replaces backend orange.
-   Exclude .rail-bar so the engine-color rules below can paint it. */
-.mermaid .node rect:not(.rail-bar),
-.mermaid .node polygon,
-.mermaid .node circle,
-.mermaid .node ellipse {
-  fill: #ffffff !important;
-  stroke: var(--border) !important;
-  stroke-width: 1px !important;
+.diagram-empty {
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  width: 100%;
 }
 
-/* Node labels */
-.mermaid .nodeLabel,
-.mermaid .node .label,
-.mermaid .node foreignObject div {
-  color: var(--text) !important;
-  font-family: var(--font-mono) !important;
-  font-size: 11.5px !important;
+/* Data-flow nodes */
+.df-card {
+  fill: #ffffff;
+  stroke: var(--border);
+  stroke-width: 1;
 }
-.mermaid .node small {
-  color: var(--text-muted) !important;
-  font-size: 9.5px !important;
+.df-node.current .df-card {
+  stroke: var(--accent);
+  stroke-width: 1.6;
 }
-.mermaid .node small b {
-  color: var(--text) !important;
-  font-weight: 600 !important;
+.df-halo {
+  fill: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.18;
+  stroke-width: 3;
+  pointer-events: none;
+}
+.df-rail { fill: var(--border); }
+.df-node.engine-mergetree   .df-rail { fill: var(--t-mergetree-fg); }
+.df-node.engine-replicated  .df-rail { fill: var(--t-replicated-fg); }
+.df-node.engine-distributed .df-rail { fill: var(--t-distributed-fg); }
+.df-node.engine-mview       .df-rail { fill: var(--t-mview-fg); }
+.df-node.engine-dictionary  .df-rail { fill: var(--t-dictionary-fg); }
+.df-node.current .df-rail { fill: var(--accent); }
+
+.df-title {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  fill: var(--text);
+}
+.df-node.current .df-title { font-weight: 700; }
+.df-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-faint);
+}
+.df-meta {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-muted);
 }
 
-/* Edges — light grey arrows with subtle stroke */
-.mermaid .edgePath .path,
-.mermaid .flowchart-link {
-  stroke: #cbd0d8 !important;
-  stroke-width: 1px !important;
-  fill: none !important;
-}
-.mermaid .arrowheadPath,
-.mermaid marker path,
-.mermaid defs marker path {
-  fill: #cbd0d8 !important;
-  stroke: #cbd0d8 !important;
+.df-pin { fill: var(--accent); }
+.df-pin-text {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  fill: #ffffff;
 }
 
-/* Edge labels — small white pill */
-.mermaid .edgeLabel {
-  background: transparent !important;
-  font-family: var(--font-mono) !important;
-  font-size: 10px !important;
-  color: var(--text-muted) !important;
+.df-edge {
+  fill: none;
+  stroke: #cbd0d8;
+  stroke-width: 1;
 }
-.mermaid .edgeLabel rect { fill: #ffffff !important; stroke: var(--border) !important; }
-.mermaid .edgeLabel foreignObject {
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 6px;
+.df-edge.active {
+  stroke: var(--accent);
+  stroke-width: 1.4;
 }
 
-/* Colored rail — class hooks applied by JS post-render. Default rail is the
-   subtle border color so untagged nodes still get a visible rail rather than
-   blending into the card. */
-.mermaid .node .rail-bar { fill: var(--border); }
-.mermaid .node.engine-mergetree   .rail-bar { fill: var(--t-mergetree-fg) !important; }
-.mermaid .node.engine-replicated  .rail-bar { fill: var(--t-replicated-fg) !important; }
-.mermaid .node.engine-distributed .rail-bar { fill: var(--t-distributed-fg) !important; }
-.mermaid .node.engine-mview       .rail-bar { fill: var(--t-mview-fg) !important; }
-.mermaid .node.engine-dictionary  .rail-bar { fill: var(--t-dictionary-fg) !important; }
-
-/* Current (selected) node — accent ring */
-.mermaid .node.current rect:not(.rail-bar),
-.mermaid .node.current polygon {
-  stroke: var(--accent) !important;
-  stroke-width: 1.6px !important;
+/* Relationships — table cards with column rows */
+.rel-card {
+  fill: #ffffff;
+  stroke: var(--border);
+  stroke-width: 1;
 }
-.mermaid .node.current .rail-bar { fill: var(--accent) !important; }
-
-/* Subgraphs (for relationships view) */
-.mermaid .cluster rect {
-  fill: #ffffff !important;
-  stroke: var(--border) !important;
-  stroke-dasharray: 0 !important;
-  rx: 6;
-  ry: 6;
+.rel-table.current .rel-card {
+  stroke: var(--accent);
+  stroke-width: 1.6;
 }
-.mermaid .cluster-label foreignObject div,
-.mermaid .cluster .nodeLabel {
-  font-size: 10px !important;
-  font-weight: 600 !important;
-  color: var(--text-muted) !important;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+.rel-halo {
+  fill: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.18;
+  stroke-width: 3;
+  pointer-events: none;
+}
+.rel-rail { fill: var(--border); }
+.rel-table.engine-mergetree   .rel-rail { fill: var(--t-mergetree-fg); }
+.rel-table.engine-replicated  .rel-rail { fill: var(--t-replicated-fg); }
+.rel-table.engine-distributed .rel-rail { fill: var(--t-distributed-fg); }
+.rel-table.engine-mview       .rel-rail { fill: var(--t-mview-fg); }
+.rel-table.engine-dictionary  .rel-rail { fill: var(--t-dictionary-fg); }
+.rel-table.current .rel-rail { fill: var(--accent); }
+
+.rel-role {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-faint);
+}
+.rel-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  fill: var(--text);
+}
+.rel-engine {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-muted);
+}
+
+.rel-divider {
+  stroke: var(--border-soft);
+  stroke-width: 0.5;
+}
+.rel-col-bg { fill: var(--bg); }
+.rel-col-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--text);
+}
+.rel-col-type {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  fill: var(--text-muted);
+}
+
+.rel-edge {
+  fill: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.5;
+  stroke-width: 1.4;
+}
+.rel-edge-label rect {
+  fill: #ffffff;
+  stroke: var(--border);
+}
+.rel-edge-label text {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  fill: var(--accent);
 }
 
 /* ─── Details panel ──────────────────────────────────────────────────────── */
