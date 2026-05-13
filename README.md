@@ -4,7 +4,7 @@
 
 <img src="static/img/logo_256x256.png" alt="Logo">
 
-A powerful open-source web application for visualizing ClickHouse table relationships using Mermaid.js diagrams. Browse databases and tables with an intuitive interface, explore table metadata with optional row counts and size information, and export interactive schema diagrams.
+An open-source web application for visualizing ClickHouse table relationships. It connects to a ClickHouse instance, parses `system.tables` metadata (engine types, dependencies, materialized view SELECTs), and renders interactive table-level **data flow** diagrams alongside column-level **relationships** with the transformation expressions on each edge. Diagrams are laid out with [Dagre](https://github.com/dagrejs/dagre) and rendered as plain SVG — no client-side diagramming runtime required.
 
 [![Build Status](https://github.com/FulgerX2007/clickhouse-schemaflow-visualizer/actions/workflows/release.yml/badge.svg)](https://github.com/FulgerX2007/clickhouse-schemaflow-visualizer/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -17,31 +17,32 @@ A powerful open-source web application for visualizing ClickHouse table relation
 
 <div align="center">
 
-![Main window](assets/screenshots/screenshot_1.png)
+![Main window — Data Flow view showing the full pipeline from a ReplicatedMergeTree fact table through a Materialized View to a ReplicatedAggregatingMergeTree, with Distributed wrappers](assets/screenshots/screenshot_1.png)
 
-![Table relationships](assets/screenshots/screenshot_2.png)
+![Column-level relationships for a Materialized View, with the parsed SELECT expressions (toDate, avgState, maxState) labelled on the edges](assets/screenshots/screenshot_2.png)
 
-![Table relationships](assets/screenshots/screenshot_3.png)
+![Column-level relationships for a Materialized View feeding a SummingMergeTree](assets/screenshots/screenshot_3.png)
 
 </div>
 
 ## ✨ Features
 
-- 🔍 Browse ClickHouse databases and tables with an intuitive interface
-- 📊 Visualize table relationships with Mermaid.js diagrams
-- 🎨 Color-coded icons matching table types for better visualization
-- ↔️ View direction of data flow between tables
-- 📂 Collapsible table types legend for a cleaner interface
-- 📈 Toggle metadata visibility (table rows and size information)
-- 💾 Export diagrams as standalone HTML files
-- 🔒 Secure connection to ClickHouse with TLS support
-- 📱 Responsive web interface for all devices
+- 🔍 Browse ClickHouse databases and tables with an intuitive sidebar
+- 🧭 **Data Flow** view — table-level upstream sources and downstream materializations for the selected table
+- 🪢 **Relationships** view — column-level mapping with the parsed transformation expression on each edge (e.g. `toStartOfHour(scheduled_departure)`, `avgState(delay_minutes)`)
+- 🎨 Engine-type icons and colour coding for MergeTree, Replicated, Distributed, MaterializedView, and Dictionary engines
+- 🔦 Click a column in the Relationships view to highlight its full data path through the pipeline
+- ⌨️ Live sidebar filter and a `Ctrl+K` / `⌘K` command palette to jump to any table, column, or engine
+- 📈 Optional metadata overlay showing row counts and on-disk size per table
+- 💾 Export the current diagram as a standalone HTML file (self-contained, no external assets)
+- 🔒 TLS connection to ClickHouse with optional skip-verify and custom CA / client certificates
+- 📱 Responsive layout that works on desktop and tablet viewports
 
 ## 🏗️ Architecture
 
-- **Backend**: Golang with Gin framework
-- **Frontend**: HTML, CSS, and JavaScript with Mermaid.js
-- **Database**: ClickHouse
+- **Backend**: Go (Gin) — single binary that serves both the REST API under `/api/` and the embedded static frontend
+- **Frontend**: vanilla HTML / CSS / JavaScript; diagrams laid out with [Dagre](https://github.com/dagrejs/dagre) and rendered as inline SVG by a custom renderer (no Mermaid runtime)
+- **Database**: ClickHouse — the visualizer is read-only and only queries `system.tables`, `system.columns`, and the `CREATE` statements they expose
 
 ## 📋 Prerequisites
 
@@ -113,7 +114,6 @@ A powerful open-source web application for visualizing ClickHouse table relation
 
 3. Install Go dependencies:
    ```bash
-   cd backend
    go mod download
    ```
 
@@ -126,36 +126,54 @@ A powerful open-source web application for visualizing ClickHouse table relation
 
 ## 📖 Usage
 
-### 1. Browse Databases and Tables
-- The left panel displays all available databases and tables
-- Click on a database to expand/collapse its tables
-- Click on a table to view its schema
+### 1. Browse databases and tables
+- The left panel lists every database and the tables it contains.
+- Click a database to expand or collapse its table list.
+- Click a table to load it into the main panel.
+- Use the **filter tables** input (or press `/`) to narrow the sidebar by name.
+- Press `Ctrl+K` (or `⌘K` on macOS) to open the command palette and jump to any table, column, or engine type.
 
-### 2. Toggle Table Metadata
-- Use the "Show Metadata" toggle switch below the Table Types section
-- When enabled, displays table statistics (row count and size) under each table name
-- Metadata is hidden by default for a cleaner interface
-- Your preference is automatically saved and restored
+### 2. Switch between Data Flow and Relationships
+- **Data Flow** shows the selected table at the centre, with upstream sources flowing in and downstream materializations flowing out — the easiest way to see how data reaches a given table.
+- **Relationships** shows the same set of tables broken out column-by-column, with the parsed SELECT expression of any Materialized View labelled on the connecting edge. Click a column to highlight its full upstream and downstream path.
 
-### 3. View Table Relationships
-- Select a table to see its relationships with other tables
-- The diagram shows the table structure and relationships
+### 3. Toggle table metadata
+- Use the **show metadata** toggle below the engine-types legend to display row counts and on-disk size under each table name in the sidebar.
+- Metadata is hidden by default for a cleaner sidebar; your preference is persisted in `localStorage`.
 
-### 4. Export Diagrams
-- Click "Export HTML" to save the current diagram as an HTML file
+### 4. Export diagrams
+- Click **Export HTML** to save the current diagram as a self-contained HTML file you can drop into a wiki, attach to a ticket, or commit to a runbook.
 
 ## 🔧 How It Works
 
-The application analyzes ClickHouse table structures by querying system tables:
-- `system.tables` to get tables in each database and determine their types
+The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers everything once and caches it in memory; click the sidebar **↻** button to refresh.
 
-Relationships between tables are determined based on column names:
-- Direction of data flow is determined automatically for:
-  - distributed tables
-  - materialized views
-  - replicated tables
-  - regular tables
-  - dictionaries
+Relationship discovery is engine-aware:
+- `MergeTree` / `Replicated*MergeTree` — leaf tables; show as the source or sink of a flow.
+- `Distributed` — the `Distributed(...)` engine arguments are parsed to find the underlying local cluster table; the visualizer draws an edge from the local table to its Distributed wrapper.
+- `MaterializedView` — the MV's stored `SELECT` is parsed to find both the source table (`FROM ...`) and the per-column transformation expressions; an edge is drawn from each referenced source column to the corresponding target column, with the expression rendered as the edge label.
+- `Dictionary` — the dictionary's `SOURCE(...)` clause is inspected to link the dictionary back to its underlying table.
+
+Node IDs in the diagrams use CityHash32 of the fully qualified table name to stay deterministic and collision-resistant across reloads, and column names / expressions are sanitized so anything containing reserved characters still renders.
+
+## 🧪 Local test stack
+
+The repository ships with a separate compose file that boots a single-node ClickHouse cluster (with ZooKeeper, so `Replicated*` and `Distributed` engines work) and seeds it with a small `airports` / `flights` demo schema designed to exercise every relationship-parsing branch above:
+
+```bash
+docker compose -f docker-compose.clickhouse-test.yml up -d
+```
+
+This brings up:
+- ZooKeeper on `:2181`
+- ClickHouse on `:9000` (native) and `:8123` (HTTP), credentials `default` / `default`
+- The visualizer on `:8080`, pre-wired to the ClickHouse container
+
+The seed (`scripts/clickhouse_test_engines.sql`) creates two databases:
+- **`raw`** — `airports_local` (`MergeTree`) and `flights_local` (`ReplicatedMergeTree`), each with a `Distributed` wrapper.
+- **`aggregated`** — `flight_stats_daily_local` (`ReplicatedAggregatingMergeTree`) and `airport_traffic_hourly_local` (`SummingMergeTree`), each fed by a Materialized View from `raw.flights_local` and exposed through a `Distributed` wrapper.
+
+Tear down and re-seed at any time with `docker compose -f docker-compose.clickhouse-test.yml down -v`.
 
 
 ## 👨‍💻 Development
@@ -164,29 +182,31 @@ Relationships between tables are determined based on column names:
 
 ```
 clickhouse-schemaflow-visualizer/
-├── api/             # API handlers
-│   └── handlers.go  # API endpoint implementations
-├── assets/          # Project assets
-│   └── screenshots/ # Screenshots for documentation
-├── config/          # Configuration handling
-│   └── config.go    # Environment configuration loader
-├── models/          # Data models and ClickHouse client
-│   └── clickhouse.go # ClickHouse connection and schema handling
-├── static/          # Frontend static files
-│   ├── css/         # CSS styles
-│   │   └── styles.css # Main stylesheet
-│   ├── html/        # HTML templates
-│   │   └── index.html # Main application page
-│   ├── img/         # Images and icons
-│   └── js/          # JavaScript code
-│       └── app.js   # Main application logic
-├── .env.example     # Example environment configuration
-├── docker-compose.yml # Docker Compose configuration
-├── Dockerfile       # Docker build instructions
-├── go.mod           # Go module dependencies
-├── go.sum           # Go module checksums
-├── main.go          # Application entry point
-└── README.md        # Documentation
+├── api/                              # HTTP handlers (Gin)
+│   └── handlers.go                   # /api/databases, /api/schema, /api/relationships, /api/table
+├── assets/                           # Project assets
+│   └── screenshots/                  # Screenshots used in this README
+├── config/                           # Configuration handling
+│   └── config.go                     # Environment configuration loader
+├── models/                           # Domain logic
+│   └── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery, diagram model
+├── scripts/                          # Helper SQL and packaging scripts
+│   └── clickhouse_test_engines.sql   # Seed schema for the local test stack
+├── static/                           # Embedded frontend
+│   ├── css/styles.css                # Stylesheet
+│   ├── html/index.html               # Single-page shell
+│   ├── img/                          # Logo and icons
+│   └── js/                           # Frontend JavaScript
+│       ├── app.js                    # Sidebar, command palette, API wiring
+│       ├── diagram.js                # Dagre layout + SVG renderer for both views
+│       └── vendor/                   # Bundled third-party JS (Dagre)
+├── .env.example                      # Example environment configuration
+├── docker-compose.yml                # Production-style compose (visualizer only)
+├── docker-compose.clickhouse-test.yml # Local test stack: ZooKeeper + ClickHouse + visualizer
+├── Dockerfile                        # Multi-stage build for the visualizer image
+├── go.mod / go.sum                   # Go module dependencies
+├── main.go                           # Entry point: loads .env, registers routes, serves static files
+└── README.md                         # This file
 ```
 
 ### Building from Source
