@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	api := router.Group("/api")
 	{
 		api.GET("/databases", h.GetDatabases)
+		api.GET("/columns", h.GetColumnIndex)
 		api.GET("/dataflow/:database/:table", h.GetDataFlowGraph)
 		api.GET("/relationships/:database/:table", h.GetRelationshipsGraph)
 		api.GET("/table/:database/:table", h.GetTableDetails)
@@ -43,6 +44,18 @@ func (h *Handler) GetDatabases(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, databases)
+}
+
+// GetColumnIndex returns every column across every allowed database. Used by
+// the frontend search palette so it can match column names without paying a
+// per-keystroke roundtrip cost.
+func (h *Handler) GetColumnIndex(c *gin.Context) {
+	idx, err := h.clickhouse.BuildColumnIndex()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, idx)
 }
 
 // GetDataFlowGraph returns a structured DAG of upstream/downstream tables for

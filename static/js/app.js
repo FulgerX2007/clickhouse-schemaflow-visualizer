@@ -63,6 +63,13 @@ const relationshipsSection = document.getElementById('relationships-section');
 const tableDetailsContainer = document.querySelector('.table-details-container');
 const tableDetailsContent   = document.getElementById('table-details');
 
+const sidebarFilterInput = document.getElementById('sidebar-filter-input');
+const paletteBtn         = document.getElementById('open-palette-btn');
+const paletteShortcutKbd = document.getElementById('palette-shortcut-kbd');
+const paletteEl          = document.getElementById('cmd-palette');
+const paletteInput       = document.getElementById('palette-input');
+const paletteResultsEl   = document.getElementById('palette-results');
+
 // ─── State ───────────────────────────────────────────────────────────────
 let databases = [];
 let selectedDatabase = null;
@@ -135,6 +142,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const isVisible = localStorage.getItem('tableDetailsVisible') !== 'false';
         if (!isVisible) tableDetailsContainer.classList.add('collapsed');
     }
+
+    setupSidebarFilter();
+    setupCommandPalette();
 });
 
 function relationshipsZoomResetIfAny() {
@@ -530,4 +540,407 @@ function commonDiagramCss() {
 .rel-edge-label rect { fill:#fff; stroke:var(--border); }
 .rel-edge-label text { font: 500 10px 'JetBrains Mono', monospace; fill:var(--accent); }
 `;
+}
+
+// ─── Sidebar filter ──────────────────────────────────────────────────────
+function setupSidebarFilter() {
+    if (!sidebarFilterInput) return;
+
+    let queryTimer = null;
+    sidebarFilterInput.addEventListener('input', () => {
+        clearTimeout(queryTimer);
+        queryTimer = setTimeout(() => applySidebarFilter(sidebarFilterInput.value), 60);
+    });
+    sidebarFilterInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            sidebarFilterInput.value = '';
+            applySidebarFilter('');
+            sidebarFilterInput.blur();
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        // '/' focuses the sidebar filter, like in many code-search tools.
+        if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+        if (paletteEl && !paletteEl.hidden) return;
+        e.preventDefault();
+        sidebarFilterInput.focus();
+        sidebarFilterInput.select();
+    });
+}
+
+function applySidebarFilter(rawQuery) {
+    const q = (rawQuery || '').trim().toLowerCase();
+    const dbItems = databaseTree.querySelectorAll(':scope > li');
+    let totalMatches = 0;
+
+    // Allow matching by engine name too: e.g. "MaterializedView" or "MView".
+    const engineKeyFromQuery = matchEngineKey(q);
+
+    dbItems.forEach((dbItem) => {
+        const dbSpan = dbItem.querySelector(':scope > .database');
+        const ul = dbItem.querySelector(':scope > ul');
+        if (!dbSpan || !ul) return;
+
+        const dbName = (dbSpan.querySelector('.db-name')?.textContent || '').toLowerCase();
+        const tableLis = ul.querySelectorAll(':scope > li.table');
+
+        let dbHasMatch = false;
+        let visibleTables = 0;
+        tableLis.forEach((li) => {
+            const tname = (li.dataset.table || '').toLowerCase();
+            const tengine = (li.dataset.engine || '').toLowerCase();
+            let matches = !q;
+            if (q && !matches) matches = tname.includes(q) || dbName.includes(q);
+            if (q && !matches && engineKeyFromQuery) matches = tengine === engineKeyFromQuery;
+            li.classList.toggle('filter-hidden', !matches);
+            if (matches) {
+                dbHasMatch = true;
+                visibleTables++;
+            }
+        });
+
+        if (q) {
+            dbItem.classList.toggle('filter-hidden', !dbHasMatch);
+            if (dbHasMatch) {
+                ul.style.display = 'block';
+                dbSpan.classList.add('open');
+            }
+            totalMatches += visibleTables;
+        } else {
+            dbItem.classList.remove('filter-hidden');
+        }
+    });
+
+    let emptyEl = databaseTree.querySelector('.filter-empty');
+    if (q && totalMatches === 0) {
+        if (!emptyEl) {
+            emptyEl = document.createElement('li');
+            emptyEl.className = 'filter-empty';
+            emptyEl.textContent = 'no tables match';
+            databaseTree.appendChild(emptyEl);
+        }
+    } else if (emptyEl) {
+        emptyEl.remove();
+    }
+}
+
+function matchEngineKey(qLower) {
+    if (!qLower) return null;
+    const aliases = {
+        mergetree:   ['mergetree'],
+        replicated:  ['replicated'],
+        distributed: ['distributed'],
+        mview:       ['materializedview', 'materialized view', 'mview', 'mv'],
+        dictionary:  ['dictionary', 'dict'],
+    };
+    for (const [key, names] of Object.entries(aliases)) {
+        if (names.some((n) => n === qLower)) return key;
+    }
+    return null;
+}
+
+// ─── Command palette ─────────────────────────────────────────────────────
+let columnIndex = null;
+let columnIndexLoading = null;
+let paletteActiveIndex = 0;
+let paletteResults = [];
+
+function setupCommandPalette() {
+    if (!paletteEl) return;
+
+    if (paletteShortcutKbd) {
+        paletteShortcutKbd.textContent = isMac() ? '⌘K' : 'Ctrl+K';
+    }
+
+    paletteBtn.addEventListener('click', openPalette);
+
+    document.addEventListener('keydown', (e) => {
+        // Cmd/Ctrl+K toggles
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+            e.preventDefault();
+            if (paletteEl.hidden) openPalette();
+            else closePalette();
+            return;
+        }
+        if (paletteEl.hidden) return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closePalette();
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            movePaletteSelection(1);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            movePaletteSelection(-1);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            commitPaletteSelection();
+        }
+    });
+
+    paletteEl.addEventListener('click', (e) => {
+        if (e.target.hasAttribute('data-palette-close')) closePalette();
+    });
+
+    paletteInput.addEventListener('input', () => {
+        renderPaletteResults(paletteInput.value);
+    });
+}
+
+function isMac() {
+    return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+}
+
+function openPalette() {
+    paletteEl.hidden = false;
+    paletteEl.setAttribute('aria-hidden', 'false');
+    paletteInput.value = '';
+    paletteActiveIndex = 0;
+    ensureColumnIndex().then(() => {
+        if (!paletteEl.hidden) renderPaletteResults('');
+    });
+    renderPaletteResults('');
+    setTimeout(() => paletteInput.focus(), 0);
+}
+
+function closePalette() {
+    paletteEl.hidden = true;
+    paletteEl.setAttribute('aria-hidden', 'true');
+    paletteResults = [];
+    paletteActiveIndex = 0;
+}
+
+async function ensureColumnIndex() {
+    if (columnIndex) return columnIndex;
+    if (columnIndexLoading) return columnIndexLoading;
+    columnIndexLoading = fetch('/api/columns')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => {
+            columnIndex = Array.isArray(data) ? data : [];
+            return columnIndex;
+        })
+        .catch(() => {
+            columnIndex = [];
+            return columnIndex;
+        });
+    return columnIndexLoading;
+}
+
+const ENGINE_PALETTE_ITEMS = Object.entries(ENGINE_TYPES).map(([key, v]) => ({
+    kind: 'engine',
+    engineKey: key,
+    label: v.name,
+}));
+
+function getAllTables() {
+    const items = [];
+    document.querySelectorAll('.tree-view .table').forEach((el) => {
+        const db = el.dataset.database;
+        const t = el.dataset.table;
+        const engine = el.dataset.engine || 'mergetree';
+        if (db && t) items.push({ kind: 'table', db, table: t, engineKey: engine, id: `${db}.${t}` });
+    });
+    return items;
+}
+
+function scoreMatch(haystack, needle) {
+    if (!needle) return 1;
+    const h = haystack.toLowerCase();
+    const n = needle.toLowerCase();
+    if (h === n) return 1000;
+    if (h.startsWith(n)) return 600 - (h.length - n.length); // prefer shorter haystacks
+    const idx = h.indexOf(n);
+    if (idx === -1) return 0;
+    // substring match — prefer earlier positions and shorter haystacks
+    return 300 - idx - (h.length - n.length) * 0.1;
+}
+
+function renderPaletteResults(rawQuery) {
+    const q = (rawQuery || '').trim();
+    paletteResultsEl.innerHTML = '';
+
+    if (!q) {
+        if (columnIndexLoading && !columnIndex) {
+            const li = document.createElement('li');
+            li.className = 'palette-loading';
+            li.textContent = 'indexing columns…';
+            paletteResultsEl.appendChild(li);
+            return;
+        }
+        const li = document.createElement('li');
+        li.className = 'palette-empty';
+        li.textContent = 'Type to search tables, columns, or engines.';
+        paletteResultsEl.appendChild(li);
+        paletteResults = [];
+        return;
+    }
+
+    const tables = getAllTables()
+        .map((t) => ({ ...t, _score: Math.max(scoreMatch(t.table, q), scoreMatch(t.id, q) - 5) }))
+        .filter((t) => t._score > 0)
+        .sort((a, b) => b._score - a._score)
+        .slice(0, 8);
+
+    const cols = (columnIndex || [])
+        .map((c) => ({ ...c, _score: scoreMatch(c.name, q) }))
+        .filter((c) => c._score > 0)
+        .sort((a, b) => b._score - a._score)
+        .slice(0, 8);
+
+    const engines = ENGINE_PALETTE_ITEMS
+        .map((e) => ({ ...e, _score: scoreMatch(e.label, q) }))
+        .filter((e) => e._score > 0)
+        .sort((a, b) => b._score - a._score);
+
+    paletteResults = [];
+
+    if (tables.length) {
+        paletteResultsEl.appendChild(groupLabel('Tables'));
+        tables.forEach((t) => {
+            paletteResults.push({ kind: 'table', db: t.db, table: t.table, engineKey: t.engineKey });
+        });
+        renderRows(tables.map((t) => ({
+            kind: 'table',
+            engineKey: t.engineKey,
+            glyph: glyphFor(t.engineKey),
+            label: highlight(t.table, q),
+            sub: t.db,
+            meta: ENGINE_TYPES[t.engineKey]?.name || '',
+        })));
+    }
+
+    if (cols.length) {
+        paletteResultsEl.appendChild(groupLabel('Columns'));
+        cols.forEach((c) => {
+            paletteResults.push({ kind: 'table', db: c.database, table: c.table });
+        });
+        renderRows(cols.map((c) => ({
+            kind: 'column',
+            glyph: '𝙓',
+            label: highlight(c.name, q),
+            sub: `${c.database}.${c.table}`,
+            meta: simplifyType(c.type),
+        })));
+    }
+
+    if (engines.length) {
+        paletteResultsEl.appendChild(groupLabel('Engines'));
+        engines.forEach((e) => {
+            paletteResults.push({ kind: 'engine', engineKey: e.engineKey });
+        });
+        renderRows(engines.map((e) => ({
+            kind: 'engine',
+            glyph: '◌',
+            label: highlight(e.label, q),
+            sub: 'engine family',
+        })));
+    }
+
+    if (!paletteResults.length) {
+        const li = document.createElement('li');
+        li.className = 'palette-empty';
+        li.textContent = `No matches for “${q}”.`;
+        paletteResultsEl.appendChild(li);
+    }
+
+    paletteActiveIndex = 0;
+    updatePaletteActive();
+}
+
+function groupLabel(text) {
+    const li = document.createElement('li');
+    li.className = 'palette-group-label';
+    li.textContent = text;
+    return li;
+}
+
+function glyphFor(engineKey) {
+    return ({
+        mergetree:   '▤',
+        replicated:  '◈',
+        distributed: '⋈',
+        mview:       '◐',
+        dictionary:  '☱',
+    })[engineKey] || '▤';
+}
+
+function simplifyType(type) {
+    if (!type) return '';
+    return type.length > 22 ? type.slice(0, 21) + '…' : type;
+}
+
+function highlight(label, q) {
+    if (!q) return escapeHtml(label);
+    const lower = label.toLowerCase();
+    const needle = q.toLowerCase();
+    const idx = lower.indexOf(needle);
+    if (idx < 0) return escapeHtml(label);
+    return (
+        escapeHtml(label.slice(0, idx)) +
+        '<span class="label-match">' +
+        escapeHtml(label.slice(idx, idx + needle.length)) +
+        '</span>' +
+        escapeHtml(label.slice(idx + needle.length))
+    );
+}
+
+function renderRows(rowSpecs) {
+    rowSpecs.forEach((spec) => {
+        const li = document.createElement('li');
+        li.className = 'palette-row';
+        li.setAttribute('data-kind', spec.kind);
+        li.setAttribute('role', 'option');
+        li.innerHTML = `
+            <span class="row-glyph ${spec.engineKey ? `engine-${spec.engineKey}` : ''}">${escapeHtml(spec.glyph)}</span>
+            <span class="row-label">${spec.label}${spec.sub ? `<span class="row-sub">${escapeHtml(spec.sub)}</span>` : ''}</span>
+            <span class="row-meta">${escapeHtml(spec.meta || '')}</span>
+        `;
+        const indexInResults = paletteResultsEl.querySelectorAll('li.palette-row').length;
+        li.addEventListener('mousemove', () => {
+            if (paletteActiveIndex !== indexInResults) {
+                paletteActiveIndex = indexInResults;
+                updatePaletteActive();
+            }
+        });
+        li.addEventListener('click', () => {
+            paletteActiveIndex = indexInResults;
+            commitPaletteSelection();
+        });
+        paletteResultsEl.appendChild(li);
+    });
+}
+
+function updatePaletteActive() {
+    const rows = paletteResultsEl.querySelectorAll('li.palette-row');
+    rows.forEach((row, i) => row.classList.toggle('active', i === paletteActiveIndex));
+    const active = rows[paletteActiveIndex];
+    if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function movePaletteSelection(delta) {
+    const rows = paletteResultsEl.querySelectorAll('li.palette-row');
+    if (!rows.length) return;
+    paletteActiveIndex = (paletteActiveIndex + delta + rows.length) % rows.length;
+    updatePaletteActive();
+}
+
+function commitPaletteSelection() {
+    const result = paletteResults[paletteActiveIndex];
+    if (!result) return;
+
+    if (result.kind === 'table') {
+        closePalette();
+        selectTableByID(`${result.db}.${result.table}`);
+    } else if (result.kind === 'engine') {
+        closePalette();
+        if (sidebarFilterInput) {
+            const engineName = ENGINE_TYPES[result.engineKey]?.name || result.engineKey;
+            sidebarFilterInput.value = engineName;
+            applySidebarFilter(engineName);
+            sidebarFilterInput.focus();
+        }
+    }
 }

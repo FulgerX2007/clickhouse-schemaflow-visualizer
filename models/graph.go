@@ -100,6 +100,45 @@ type RelationshipsGraph struct {
 	Edges  []RelEdge  `json:"edges"`
 }
 
+// ColumnIndexEntry is one row of the global column index used by the search palette.
+type ColumnIndexEntry struct {
+	Database string `json:"database"`
+	Table    string `json:"table"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+}
+
+// BuildColumnIndex returns every column across every allowed database/table in
+// one query against system.columns. Cheap on the ClickHouse side and lets the
+// frontend search palette work with zero per-keystroke roundtrips.
+func (c *ClickHouseClient) BuildColumnIndex() ([]ColumnIndexEntry, error) {
+	ctx := context.Background()
+	query := `
+		SELECT database, table, name, type
+		FROM system.columns
+		WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA', 'performance_schema', 'mysql')
+		ORDER BY database, table, position
+	`
+	rows, err := c.conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query system.columns: %w", err)
+	}
+	defer rows.Close()
+
+	var idx []ColumnIndexEntry
+	for rows.Next() {
+		var e ColumnIndexEntry
+		if err := rows.Scan(&e.Database, &e.Table, &e.Name, &e.Type); err != nil {
+			return nil, fmt.Errorf("failed to scan column row: %w", err)
+		}
+		idx = append(idx, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating column rows: %w", err)
+	}
+	return idx, nil
+}
+
 // BuildDataFlowGraph walks table relations forward and backward from the selected
 // table and returns a structured DAG of nodes and edges. No string-templating,
 // no sanitisation — the frontend renders this with a real layout engine.
@@ -119,7 +158,10 @@ func (c *ClickHouseClient) BuildDataFlowGraph(dbName, tableName string) (DataFlo
 	walkForward(nodes, edges, relations, current, seen, 0)
 	walkBackward(nodes, edges, relations, current, seen, 0)
 
-	g := DataFlowGraph{Nodes: make([]GraphNode, 0, len(nodes)), Edges: make([]GraphEdge, 0, len(edges))}
+	g := DataFlowGraph{
+		Nodes: make([]GraphNode, 0, len(nodes)),
+		Edges: make([]GraphEdge, 0, len(edges)),
+	}
 	for _, n := range nodes {
 		g.Nodes = append(g.Nodes, n)
 	}
@@ -216,7 +258,7 @@ func (c *ClickHouseClient) BuildRelationshipsGraph(dbName, tableName string) (Re
 		return RelationshipsGraph{}, fmt.Errorf("failed to get table info: %w", err)
 	}
 
-	g := RelationshipsGraph{}
+	g := RelationshipsGraph{Tables: []RelTable{}, Edges: []RelEdge{}}
 	addTable := func(role RelTableRole, db, name string, cols []ColumnInfo, eng string) {
 		id := db + "." + name
 		t := RelTable{
