@@ -63,6 +63,8 @@ const relationshipsSection = document.getElementById('relationships-section');
 const tableDetailsContainer = document.querySelector('.table-details-container');
 const tableDetailsContent   = document.getElementById('table-details');
 
+const connNameEl         = document.getElementById('conn-name');
+const connPortEl         = document.getElementById('conn-port');
 const sidebarFilterInput = document.getElementById('sidebar-filter-input');
 const paletteBtn         = document.getElementById('open-palette-btn');
 const paletteShortcutKbd = document.getElementById('palette-shortcut-kbd');
@@ -83,6 +85,7 @@ let relationshipsPanzoom = null;
 
 // ─── Boot ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+    loadConnectionInfo();
     loadDatabases();
 
     refreshBtn.addEventListener('click', loadDatabases);
@@ -152,6 +155,18 @@ function relationshipsZoomResetIfAny() {
 }
 
 // ─── Data loading ────────────────────────────────────────────────────────
+async function loadConnectionInfo() {
+    try {
+        const response = await fetch('/api/connection');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const info = await response.json();
+        if (connNameEl) connNameEl.textContent = info.host || '';
+        if (connPortEl) connPortEl.textContent = info.port != null ? String(info.port) : '';
+    } catch (error) {
+        console.error('Error loading connection info:', error);
+    }
+}
+
 async function loadDatabases() {
     try {
         const response = await fetch('/api/databases');

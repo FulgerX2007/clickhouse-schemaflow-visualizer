@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap">
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="/static/css/styles.css?v={{.BuildID}}">
     <link rel="icon" href="/static/img/favicon.ico" type="image/x-icon">
     <div id="cmd-palette" class="palette" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-label="Search">
         <div class="palette-backdrop" data-palette-close></div>
@@ -28,7 +28,7 @@
         </div>
     </div>
 
-    <script src="/static/js/vendor/dagre.min.js" defer></script>
+    <script src="/static/js/vendor/dagre.min.js?v={{.BuildID}}" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 </head>
 <body>
@@ -47,8 +47,8 @@
         </button>
         <div class="connection-chip" title="Connection status">
             <span class="status-dot" aria-hidden="true"></span>
-            <span class="conn-name" id="conn-name">clickhouse</span>
-            <span class="conn-port" id="conn-port">9000</span>
+            <span class="conn-name" id="conn-name">…</span>
+            <span class="conn-port" id="conn-port"></span>
         </div>
     </header>
 
@@ -168,7 +168,7 @@
         </div>
     </main>
 
-    <script src="/static/js/diagram.js" defer></script>
-    <script src="/static/js/app.js" defer></script>
+    <script src="/static/js/diagram.js?v={{.BuildID}}" defer></script>
+    <script src="/static/js/app.js?v={{.BuildID}}" defer></script>
 </body>
 </html>

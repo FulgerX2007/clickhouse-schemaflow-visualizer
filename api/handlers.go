@@ -10,12 +10,14 @@ import (
 // Handler holds the dependencies for API handlers
 type Handler struct {
 	clickhouse *models.ClickHouseClient
+	config     models.Config
 }
 
 // NewHandler creates a new Handler instance
-func NewHandler(clickhouse *models.ClickHouseClient) *Handler {
+func NewHandler(clickhouse *models.ClickHouseClient, config models.Config) *Handler {
 	return &Handler{
 		clickhouse: clickhouse,
+		config:     config,
 	}
 }
 
@@ -23,12 +25,26 @@ func NewHandler(clickhouse *models.ClickHouseClient) *Handler {
 func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	api := router.Group("/api")
 	{
+		api.GET("/connection", h.GetConnection)
 		api.GET("/databases", h.GetDatabases)
 		api.GET("/columns", h.GetColumnIndex)
 		api.GET("/dataflow/:database/:table", h.GetDataFlowGraph)
 		api.GET("/relationships/:database/:table", h.GetRelationshipsGraph)
 		api.GET("/table/:database/:table", h.GetTableDetails)
 	}
+}
+
+// GetConnection returns the host, port, and TLS mode the server is connected
+// to. The frontend uses it to render the connection chip in the header. The
+// password is never exposed.
+func (h *Handler) GetConnection(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"host":     h.config.Host,
+		"port":     h.config.Port,
+		"user":     h.config.User,
+		"database": h.config.Database,
+		"secure":   h.config.Secure,
+	})
 }
 
 // GetDatabases returns a list of all databases and their tables
