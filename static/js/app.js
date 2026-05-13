@@ -406,8 +406,10 @@ function renderTableDetails(details) {
                 <tbody>
                     ${cols.map((column) => `
                         <tr>
-                            <td class="column-name" title="${escapeHtml(column.name)}">${escapeHtml(column.name)}</td>
-                            <td><span class="column-type" title="${escapeHtml(column.type)}">${escapeHtml(column.type)}</span></td>
+                            <td class="col-content">
+                                <span class="column-name" title="${escapeHtml(column.name)}">${escapeHtml(column.name)}</span>
+                                <span class="column-type" title="${escapeHtml(column.type)}">${escapeHtml(column.type)}</span>
+                            </td>
                         </tr>
                     `).join('')}
                 </tbody>
