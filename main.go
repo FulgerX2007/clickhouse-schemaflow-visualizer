@@ -1,9 +1,12 @@
 package main
 
 import (
+	"html/template"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/fulgerX2007/clickhouse-schemaflow-visualizer/api"
 	"github.com/fulgerX2007/clickhouse-schemaflow-visualizer/models"
@@ -49,12 +52,32 @@ func main() {
 	router := gin.Default()
 
 	// Create API handlers
-	handler := api.NewHandler(clickhouseClient)
+	handler := api.NewHandler(clickhouseClient, clickhouseConfig)
 	handler.RegisterRoutes(router)
 
-	// Serve static files from the frontend directory
+	// Serve static files from the frontend directory. The no-cache header tells
+	// the browser it may keep a copy but must revalidate before using it; combined
+	// with the Last-Modified header Gin already sends, unchanged files round-trip
+	// as cheap 304s and any change reaches users on the next page load.
+	noCache := func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
+	}
+	router.Use(noCache)
 	router.Static("/static", "./static")
-	router.StaticFile("/", "./static/html/index.html")
+
+	// Serve index.html through html/template so script/css URLs carry a build-id
+	// query string. That guarantees a hard cache-bust when the visualizer is
+	// upgraded, which the no-cache header alone can't enforce against browsers
+	// that aggressively reuse defer-loaded asset cache entries.
+	indexTmpl := template.Must(template.ParseFiles("./static/html/index.html"))
+	buildID := strconv.FormatInt(time.Now().Unix(), 10)
+	router.GET("/", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		if err := indexTmpl.Execute(c.Writer, gin.H{"BuildID": buildID}); err != nil {
+			log.Printf("Failed to render index.html: %v", err)
+		}
+	})
 
 	// Get server address from environment or use default
 	serverAddr := getEnv("SERVER_ADDR", ":8080")

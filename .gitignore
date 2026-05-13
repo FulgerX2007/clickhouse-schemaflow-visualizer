@@ -2,3 +2,4 @@
 .env
 memory-bank/
 dist/
+*.log

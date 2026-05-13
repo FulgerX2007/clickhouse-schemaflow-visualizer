@@ -5,13 +5,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/go-faster/city"
 )
+
+const maxRelationDepth = 50
 
 // Config holds the ClickHouse connection configuration
 type Config struct {
@@ -62,6 +64,15 @@ type TableDetails struct {
 	TotalRows  *uint64      `json:"total_rows"`
 	TotalBytes *uint64      `json:"total_bytes"`
 	Columns    []ColumnInfo `json:"columns"`
+}
+
+// ColumnRelationship represents a column-to-column mapping
+type ColumnRelationship struct {
+	SourceTable    string
+	SourceColumn   string
+	TargetTable    string
+	TargetColumn   string
+	Transformation string // The expression used to transform the column (e.g., "sum", "toDate", etc.)
 }
 
 // ClickHouseClient represents a client for interacting with ClickHouse
@@ -172,13 +183,14 @@ func formatRows(rows *uint64) string {
 
 // generateTableListContent creates the content for table display in the left sidebar
 func generateTableListContent(icon, tableName string, totalRows *uint64, totalBytes *uint64) string {
+	safeTableName := html.EscapeString(tableName)
 	if totalRows == nil {
-		return fmt.Sprintf(`%s %s`, icon, tableName)
+		return fmt.Sprintf(`%s %s`, icon, safeTableName)
 	}
 
 	return fmt.Sprintf(
 		`%s %s<br><small style="color: #000; font-size: 0.8em;">Rows: <b>%s</b> | Size: <b>%s</b></small>`,
-		icon, tableName, formatRows(totalRows), formatBytes(totalBytes),
+		icon, safeTableName, formatRows(totalRows), formatBytes(totalBytes),
 	)
 }
 
@@ -190,7 +202,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 
 	log.Println("Querying tables relations")
 	ctx := context.Background()
-	query := fmt.Sprintf("SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name")
+	query := "SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tables: %v", err)
@@ -342,84 +354,72 @@ func (c *ClickHouseClient) GetDatabases() (map[string]map[string]string, error) 
 	return DatabasesData, nil
 }
 
-// GenerateMermaidSchema generates a Mermaid schema for a table and its relationships
-func (c *ClickHouseClient) GenerateMermaidSchema(dbName, tableName string) (string, error) {
-	// Get the table schema
-	table := dbName + "." + tableName
-
-	// Start building the Mermaid schema
-	var sb strings.Builder
-	sb.WriteString("flowchart TB\n")
-
-	tablesRelations, err := c.getTablesRelations()
-	if err != nil {
-		return "", fmt.Errorf("failed to get table relations: %v", err)
+// Helper function to simplify column types for ER diagrams
+func (c *ClickHouseClient) simplifyColumnType(columnType string) string {
+	// Simplify complex ClickHouse types for better readability
+	switch {
+	case strings.Contains(columnType, "String"):
+		return "string"
+	case strings.Contains(columnType, "Int"):
+		return "int"
+	case strings.Contains(columnType, "UInt"):
+		return "uint"
+	case strings.Contains(columnType, "Float"):
+		return "float"
+	case strings.Contains(columnType, "Date"):
+		return "date"
+	case strings.Contains(columnType, "DateTime"):
+		return "datetime"
+	case strings.Contains(columnType, "UUID"):
+		return "uuid"
+	case strings.Contains(columnType, "Array"):
+		return "array"
+	case strings.Contains(columnType, "Nullable"):
+		// Extract the inner type
+		inner := strings.TrimPrefix(columnType, "Nullable(")
+		inner = strings.TrimSuffix(inner, ")")
+		return c.simplifyColumnType(inner)
+	default:
+		return "other"
 	}
-
-	// Generate node for the main table with additional info
-	nodeContent := c.generateTableNodeContent(table)
-	sb.WriteString(fmt.Sprintf("    %d[\"%s\"]\n\n", city.Hash32([]byte(table)), nodeContent))
-	sb.WriteString(fmt.Sprintf("    style %d fill:#FF6D00,stroke:#AA00FF,color:#FFFFFF\n\n", city.Hash32([]byte(table))))
-
-	seen := make(map[string]bool)
-	c.getRelationsNext(&sb, tablesRelations, table, &seen)
-	c.getRelationsBack(&sb, tablesRelations, table, &seen)
-
-	return sb.String(), nil
 }
 
-func (c *ClickHouseClient) generateTableNodeContent(table string) string {
-	if metadata, exists := TableMetadata[table]; exists && metadata.TotalRows != nil {
-		return fmt.Sprintf(
-			"%s<br><small>Rows: <b>%s</b> Size: <b>%s</b></small>",
-			table,
-			formatRows(metadata.TotalRows),
-			formatBytes(metadata.TotalBytes),
-		)
+// Helper function to determine if two columns are related
+func (c *ClickHouseClient) areColumnsRelated(col1, col2 ColumnInfo) bool {
+	col1NameLower := strings.ToLower(col1.Name)
+	col2NameLower := strings.ToLower(col2.Name)
+
+	// Exact name match
+	if col1NameLower == col2NameLower {
+		return true
 	}
-	return table
-}
 
-func (c *ClickHouseClient) getRelationsNext(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool) {
-	for _, rel := range tablesRelations {
-		if rel.DependsOnTable == table && table != "" {
-			depContent := c.generateTableNodeContent(rel.DependsOnTable)
-			relContent := c.generateTableNodeContent(rel.Table)
+	// Foreign key pattern: table_id matches id
+	if strings.HasSuffix(col1NameLower, "_id") && col2NameLower == "id" {
+		return true
+	}
+	if strings.HasSuffix(col2NameLower, "_id") && col1NameLower == "id" {
+		return true
+	}
 
-			mermaidRow := fmt.Sprintf(
-				"    %d[\"%s\"] --> %d[\"%s\"]\n",
-				city.Hash32([]byte(rel.DependsOnTable)), depContent,
-				city.Hash32([]byte(rel.Table)), relContent,
-			)
-
-			if !(*seen)[mermaidRow] {
-				(*seen)[mermaidRow] = true
-				sb.WriteString(mermaidRow)
-			}
-			c.getRelationsNext(sb, tablesRelations, rel.Table, seen)
+	// UUID relationships
+	if strings.Contains(col1.Type, "UUID") && strings.Contains(col2.Type, "UUID") {
+		// Check if column names suggest a relationship
+		if strings.Contains(col1NameLower, strings.TrimSuffix(col2NameLower, "_id")) ||
+			strings.Contains(col2NameLower, strings.TrimSuffix(col1NameLower, "_id")) {
+			return true
 		}
 	}
-}
 
-func (c *ClickHouseClient) getRelationsBack(sb *strings.Builder, tablesRelations []TableRelation, table string, seen *map[string]bool) {
-	for _, rel := range tablesRelations {
-		if rel.Table == table && rel.DependsOnTable != "" {
-			depContent := c.generateTableNodeContent(rel.DependsOnTable)
-			relContent := c.generateTableNodeContent(rel.Table)
-
-			mermaidRow := fmt.Sprintf(
-				"    %d[\"%s\"] --> %d[\"%s\"]\n",
-				city.Hash32([]byte(rel.DependsOnTable)), depContent,
-				city.Hash32([]byte(rel.Table)), relContent,
-			)
-
-			if !(*seen)[mermaidRow] {
-				(*seen)[mermaidRow] = true
-				sb.WriteString(mermaidRow)
-			}
-			c.getRelationsBack(sb, tablesRelations, rel.DependsOnTable, seen)
+	// Timestamp relationships (common in ClickHouse for partitioning)
+	if strings.Contains(col1.Type, "DateTime") && strings.Contains(col2.Type, "DateTime") {
+		if (strings.Contains(col1NameLower, "time") || strings.Contains(col1NameLower, "date")) &&
+			(strings.Contains(col2NameLower, "time") || strings.Contains(col2NameLower, "date")) {
+			return true
 		}
 	}
+
+	return false
 }
 
 // GetTableColumns returns detailed column information for a specific table
@@ -477,6 +477,173 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 		Columns:    columns,
 	}, nil
 }
+
+// parseViewQuery extracts the SELECT statement from a CREATE MATERIALIZED VIEW query
+func (c *ClickHouseClient) parseViewQuery(createQuery string) (selectQuery string, sourceTable string, destTable string) {
+	// Extract SELECT query - find everything after "AS SELECT" or just "SELECT"
+	selectIdx := strings.Index(createQuery, "SELECT")
+	if selectIdx == -1 {
+		return "", "", ""
+	}
+	selectQuery = createQuery[selectIdx:]
+
+	// Extract source table from "FROM table_name"
+	fromParts := strings.Split(createQuery, "FROM ")
+	if len(fromParts) > 1 {
+		// Get the part after FROM and extract table name
+		afterFrom := strings.TrimSpace(fromParts[1])
+		// Split by space or other separators to get just the table name
+		sourceTableParts := strings.FieldsFunc(afterFrom, func(r rune) bool {
+			return r == ' ' || r == '\n' || r == '\r' || r == '(' || r == ';'
+		})
+		if len(sourceTableParts) > 0 {
+			sourceTable = sourceTableParts[0]
+		}
+	}
+
+	// Extract destination table from "TO database.table" or "MATERIALIZED VIEW database.table"
+	toParts := strings.Split(createQuery, "TO ")
+	if len(toParts) > 1 {
+		afterTo := strings.TrimSpace(toParts[1])
+		destTableParts := strings.FieldsFunc(afterTo, func(r rune) bool {
+			return r == ' ' || r == '\n' || r == '\r' || r == '('
+		})
+		if len(destTableParts) > 0 {
+			destTable = destTableParts[0]
+		}
+	} else {
+		// Try to get from CREATE MATERIALIZED VIEW line
+		queryParts := strings.Fields(createQuery)
+		for i, part := range queryParts {
+			if part == "VIEW" && i+1 < len(queryParts) {
+				destTable = queryParts[i+1]
+				break
+			}
+		}
+	}
+
+	return selectQuery, sourceTable, destTable
+}
+
+// extractColumnMappings parses a SELECT query to extract column mappings
+func (c *ClickHouseClient) extractColumnMappings(selectQuery string, sourceColumns []ColumnInfo) []ColumnRelationship {
+	var relationships []ColumnRelationship
+
+	// Find the SELECT part and FROM part
+	selectIdx := strings.Index(selectQuery, "SELECT")
+	fromIdx := strings.Index(selectQuery, "FROM")
+
+	if selectIdx == -1 || fromIdx == -1 || fromIdx <= selectIdx {
+		return relationships
+	}
+
+	// Extract just the column list between SELECT and FROM
+	columnsPart := selectQuery[selectIdx+6 : fromIdx]
+	columnsPart = strings.TrimSpace(columnsPart)
+
+	// Split by comma (basic parsing - doesn't handle nested functions perfectly)
+	columnDefs := strings.Split(columnsPart, ",")
+
+	for _, colDef := range columnDefs {
+		colDef = strings.TrimSpace(colDef)
+		if colDef == "" {
+			continue
+		}
+
+		var sourceCol, targetCol, transformation string
+		originalExpr := colDef
+
+		// Check for AS alias: "expression AS alias"
+		if strings.Contains(strings.ToUpper(colDef), " AS ") {
+			parts := strings.SplitN(colDef, " AS ", 2)
+			if len(parts) == 2 {
+				targetCol = strings.TrimSpace(parts[1])
+				originalExpr = strings.TrimSpace(parts[0])
+				sourceCol = c.extractBaseColumnName(originalExpr, sourceColumns)
+				// Use the full expression if it's different from just the column name
+				if !strings.EqualFold(originalExpr, sourceCol) {
+					transformation = originalExpr
+				}
+			}
+		} else {
+			// No alias - column name is the same
+			sourceCol = c.extractBaseColumnName(colDef, sourceColumns)
+			targetCol = sourceCol
+			// Use the full expression if it's different from just the column name
+			if !strings.EqualFold(colDef, sourceCol) {
+				transformation = colDef
+			}
+		}
+
+		if sourceCol != "" && targetCol != "" {
+			log.Printf("Column mapping: %s -> %s (transformation: '%s', original expr: '%s')", sourceCol, targetCol, transformation, originalExpr)
+			relationships = append(relationships, ColumnRelationship{
+				SourceColumn:   sourceCol,
+				TargetColumn:   targetCol,
+				Transformation: transformation,
+			})
+		}
+	}
+
+	return relationships
+}
+
+// extractBaseColumnName extracts the actual column name from an expression
+func (c *ClickHouseClient) extractBaseColumnName(expression string, sourceColumns []ColumnInfo) string {
+	expression = strings.TrimSpace(expression)
+
+	// Remove common functions to find the column name
+	// Handle patterns like: toDate(timestamp), sum(amount), COUNT(*), etc.
+
+	// Check if it's a simple column reference first
+	for _, col := range sourceColumns {
+		if strings.EqualFold(expression, col.Name) {
+			return col.Name
+		}
+	}
+
+	// Try to extract column name from function calls
+	// Look for column names in parentheses or after function names
+	for _, col := range sourceColumns {
+		colName := col.Name
+		// Check if column name appears in the expression
+		if strings.Contains(strings.ToLower(expression), strings.ToLower(colName)) {
+			return colName
+		}
+	}
+
+	// If we can't find a source column, check if it's an aggregate or constant
+	upperExpr := strings.ToUpper(expression)
+	if strings.Contains(upperExpr, "COUNT(") ||
+	   strings.Contains(upperExpr, "SUM(") ||
+	   strings.Contains(upperExpr, "AVG(") ||
+	   strings.Contains(upperExpr, "MIN(") ||
+	   strings.Contains(upperExpr, "MAX(") {
+		// Try to extract column from inside parentheses
+		start := strings.Index(expression, "(")
+		end := strings.LastIndex(expression, ")")
+		if start != -1 && end != -1 && end > start {
+			inner := strings.TrimSpace(expression[start+1 : end])
+			// Recursively check the inner part
+			return c.extractBaseColumnName(inner, sourceColumns)
+		}
+	}
+
+	return ""
+}
+
+// isDistributedTable checks if a table is a Distributed table
+func (c *ClickHouseClient) isDistributedTable(dbName, tableName string) bool {
+	ctx := context.Background()
+	var engine string
+	query := "SELECT engine FROM system.tables WHERE database = ? AND name = ?"
+	row := c.conn.QueryRow(ctx, query, dbName, tableName)
+	if err := row.Scan(&engine); err != nil {
+		return false
+	}
+	return engine == "Distributed"
+}
+
 
 // Close closes the ClickHouse connection
 func (c *ClickHouseClient) Close() error {
