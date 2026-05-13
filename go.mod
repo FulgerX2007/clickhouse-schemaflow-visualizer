@@ -1,6 +1,6 @@
 module github.com/fulgerX2007/clickhouse-schemaflow-visualizer
 
-go 1.23.8
+go 1.26.3
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.34.0
