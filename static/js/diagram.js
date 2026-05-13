@@ -364,11 +364,20 @@
             class: 'rel-rail', x: 0, y: 0, width: 3, height: h,
         }));
 
-        g.appendChild(el('text', { class: 'rel-role', x: 14, y: 14 }, table.role));
-        g.appendChild(el('text', { class: 'rel-name', x: 14, y: 30 }, table.table));
+        // Top row: small role label (left) and engine name (right) share the
+        // same baseline since both use the 9.5px muted font. The bold table
+        // name then gets the full width of row 2 to itself. The role is
+        // omitted when the engine name would otherwise crash into it (e.g.
+        // ReplicatedAggregatingMergeTree, 30 chars) — the highlight halo and
+        // arrow direction already convey the role visually.
+        const engineName = table.engine || '';
+        if (engineName.length <= 24) {
+            g.appendChild(el('text', { class: 'rel-role', x: 14, y: 14 }, table.role));
+        }
         g.appendChild(el('text', {
-            class: 'rel-engine', x: TABLE_W - 12, y: 30, 'text-anchor': 'end',
-        }, table.engine || ''));
+            class: 'rel-engine', x: TABLE_W - 12, y: 14, 'text-anchor': 'end',
+        }, engineName));
+        g.appendChild(el('text', { class: 'rel-name', x: 14, y: 30 }, table.table));
 
         g.appendChild(el('line', {
             class: 'rel-divider',
