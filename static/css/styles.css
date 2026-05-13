@@ -853,10 +853,15 @@ main { overflow: hidden; }
   stroke-width: 0.5;
 }
 .rel-col-bg { fill: var(--bg); }
+.rel-col-hit { fill: transparent; transition: fill 0.12s ease; }
+.rel-col[data-interactive] { cursor: pointer; }
+.rel-col[data-interactive]:hover .rel-col-hit { fill: var(--bg); }
+
 .rel-col-name {
   font-family: var(--font-mono);
   font-size: 11px;
   fill: var(--text);
+  transition: fill 0.12s ease, font-weight 0.12s ease;
 }
 .rel-col-type {
   font-family: var(--font-mono);
@@ -869,6 +874,7 @@ main { overflow: hidden; }
   stroke: var(--accent);
   stroke-opacity: 0.5;
   stroke-width: 1.4;
+  transition: opacity 0.18s ease, stroke-opacity 0.18s ease, stroke-width 0.18s ease;
 }
 .rel-edge-label rect {
   fill: #ffffff;
@@ -879,6 +885,42 @@ main { overflow: hidden; }
   font-size: 10px;
   font-weight: 500;
   fill: var(--accent);
+}
+.rel-edge-label { transition: opacity 0.18s ease; }
+
+/* ─── Focus mode: click a column to light up its connections ─────────────── */
+.flow-svg.has-focus .rel-edge,
+.flow-svg.has-focus .rel-edge-label,
+.flow-svg.has-focus .rel-col {
+  opacity: 0.18;
+}
+.flow-svg.has-focus .rel-col.is-focus,
+.flow-svg.has-focus .rel-col.is-related,
+.flow-svg.has-focus .rel-edge.is-related,
+.flow-svg.has-focus .rel-edge-label.is-related {
+  opacity: 1;
+}
+/* Keep the table chrome (card, header text, divider, rail) visible even when
+   the table itself is "dimmed" — only its column rows fade. */
+.flow-svg.has-focus .rel-table > .rel-card,
+.flow-svg.has-focus .rel-table > .rel-rail,
+.flow-svg.has-focus .rel-table > .rel-role,
+.flow-svg.has-focus .rel-table > .rel-name,
+.flow-svg.has-focus .rel-table > .rel-engine,
+.flow-svg.has-focus .rel-table > .rel-divider,
+.flow-svg.has-focus .rel-table > .rel-halo {
+  opacity: 1;
+}
+
+.rel-col.is-focus .rel-col-hit { fill: var(--accent-bg); }
+.rel-col.is-focus .rel-col-name { fill: var(--accent); font-weight: 600; }
+.rel-col.is-related .rel-col-name { fill: var(--accent-fg); font-weight: 500; }
+
+.rel-edge.is-related {
+  stroke: var(--accent);
+  stroke-opacity: 1;
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 4px rgba(59, 91, 219, 0.42));
 }
 
 /* ─── Details panel ──────────────────────────────────────────────────────── */

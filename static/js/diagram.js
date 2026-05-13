@@ -35,6 +35,11 @@
         return String(s == null ? '' : s);
     }
 
+    function cssAttr(s) {
+        if (window.CSS && CSS.escape) return CSS.escape(String(s));
+        return String(s).replace(/(["\\])/g, '\\$1');
+    }
+
     function formatRows(n) {
         if (n == null) return null;
         if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
@@ -370,18 +375,21 @@
             x1: 0, y1: TABLE_HEADER_H, x2: TABLE_W, y2: TABLE_HEADER_H,
         }));
 
-        // Column rows
+        // Column rows. Each row has a transparent hit-rect that acts both as
+        // a click target and as the visible background when the row is focused.
         table.columns.forEach((col, i) => {
             const y = TABLE_HEADER_H + i * COL_ROW_H;
             const row = el('g', {
                 class: 'rel-col',
                 'data-table': table.id,
                 'data-column': col.name,
+                'data-interactive': '1',
                 transform: `translate(0,${y})`,
             });
             if (i % 2 === 1) {
                 row.appendChild(el('rect', { class: 'rel-col-bg', x: 4, y: 0, width: TABLE_W - 8, height: COL_ROW_H, rx: 3 }));
             }
+            row.appendChild(el('rect', { class: 'rel-col-hit', x: 4, y: 0, width: TABLE_W - 8, height: COL_ROW_H, rx: 3 }));
             row.appendChild(el('text', { class: 'rel-col-name', x: 14, y: 14 }, col.name));
             row.appendChild(el('text', {
                 class: 'rel-col-type', x: TABLE_W - 12, y: 14, 'text-anchor': 'end',
@@ -474,9 +482,25 @@
             nodesG.appendChild(b.g);
         }
 
-        // Draw column-level edges with optional expression labels
+        // Draw column-level edges with optional expression labels.
+        // We keep a per-column index so clicking a row can light up its edges.
         const edgesG = el('g', { class: 'rel-edges' });
         viewport.insertBefore(edgesG, nodesG);
+
+        // columnKey -> { row, edges:[], labels:[], partners:Set<columnKey> }
+        const colIndex = new Map();
+        const colKey = (table, col) => `${table}::${col}`;
+        const registerCol = (key) => {
+            if (colIndex.has(key)) return colIndex.get(key);
+            const [tableId, columnName] = key.split('::');
+            const row = svg.querySelector(
+                `g.rel-col[data-table="${cssAttr(tableId)}"][data-column="${cssAttr(columnName)}"]`,
+            );
+            const entry = { row, edges: [], labels: [], partners: new Set() };
+            colIndex.set(key, entry);
+            return entry;
+        };
+
         for (const e of graph.edges) {
             const a = tablePos.get(e.from_table);
             const b = tablePos.get(e.to_table);
@@ -494,26 +518,90 @@
             const mx = (x1 + x2) / 2;
 
             const d = `M ${x1},${y1} C ${mx},${y1} ${mx},${y2} ${x2},${y2}`;
-            edgesG.appendChild(el('path', {
+            const pathEl = el('path', {
                 class: 'rel-edge',
                 d,
                 'marker-end': 'url(#rel-arrow)',
-            }));
+            });
+            edgesG.appendChild(pathEl);
 
+            let labelEl = null;
             if (e.expression && e.expression !== '—') {
                 const labelW = Math.min(220, Math.max(48, e.expression.length * 6.5));
-                const labelG = el('g', { class: 'rel-edge-label', transform: `translate(${mx - labelW / 2},${(y1 + y2) / 2 - 9})` });
-                labelG.appendChild(el('rect', { width: labelW, height: 18, rx: 3 }));
+                labelEl = el('g', { class: 'rel-edge-label', transform: `translate(${mx - labelW / 2},${(y1 + y2) / 2 - 9})` });
+                labelEl.appendChild(el('rect', { width: labelW, height: 18, rx: 3 }));
                 const text = el('text', { x: labelW / 2, y: 13, 'text-anchor': 'middle' });
                 text.appendChild(document.createTextNode(truncateExpression(e.expression, Math.floor(labelW / 6.2))));
-                // full expression as tooltip
                 const titleEl = el('title');
                 titleEl.appendChild(document.createTextNode(e.expression));
                 text.appendChild(titleEl);
-                labelG.appendChild(text);
-                edgesG.appendChild(labelG);
+                labelEl.appendChild(text);
+                edgesG.appendChild(labelEl);
             }
+
+            const fromKey = colKey(e.from_table, e.from_column);
+            const toKey   = colKey(e.to_table,   e.to_column);
+            const fromEntry = registerCol(fromKey);
+            const toEntry   = registerCol(toKey);
+            fromEntry.edges.push(pathEl);
+            toEntry.edges.push(pathEl);
+            if (labelEl) {
+                fromEntry.labels.push(labelEl);
+                toEntry.labels.push(labelEl);
+            }
+            fromEntry.partners.add(toKey);
+            toEntry.partners.add(fromKey);
         }
+
+        // Wire focus mode: click a column row to light up its edges and partners.
+        let focusKey = null;
+        function applyFocus(nextKey) {
+            svg.querySelectorAll('.is-focus, .is-related, .is-dim').forEach((node) => {
+                node.classList.remove('is-focus', 'is-related', 'is-dim');
+            });
+            svg.classList.remove('has-focus');
+            focusKey = nextKey && colIndex.has(nextKey) ? nextKey : null;
+            if (!focusKey) return;
+
+            svg.classList.add('has-focus');
+            const entry = colIndex.get(focusKey);
+            if (entry.row) entry.row.classList.add('is-focus');
+            entry.edges.forEach((eEl)  => eEl.classList.add('is-related'));
+            entry.labels.forEach((lEl) => lEl.classList.add('is-related'));
+            entry.partners.forEach((pKey) => {
+                const p = colIndex.get(pKey);
+                if (p && p.row) p.row.classList.add('is-related');
+            });
+        }
+
+        colIndex.forEach((entry, key) => {
+            if (!entry.row) return;
+            entry.row.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                applyFocus(focusKey === key ? null : key);
+            });
+        });
+
+        svg.addEventListener('click', (ev) => {
+            if (ev.target.closest('.rel-col')) return;
+            applyFocus(null);
+        });
+
+        const escHandler = (ev) => {
+            if (ev.key === 'Escape' && focusKey) {
+                ev.preventDefault();
+                applyFocus(null);
+            }
+        };
+        document.addEventListener('keydown', escHandler);
+        // Tidy up when the container is re-rendered.
+        const cleanupObs = new MutationObserver(() => {
+            if (!container.contains(svg)) {
+                document.removeEventListener('keydown', escHandler);
+                cleanupObs.disconnect();
+            }
+        });
+        cleanupObs.observe(container, { childList: true });
 
         const gw = dg.graph().width || 800;
         const gh = dg.graph().height || 400;
