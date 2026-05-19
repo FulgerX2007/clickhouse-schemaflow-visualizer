@@ -48,6 +48,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 
 - Docker and Docker Compose
 - ClickHouse server
+- Go 1.26+ (only required if building from source — Docker users can skip)
 
 ## 🚀 Installation and Setup
 
@@ -83,6 +84,8 @@ An open-source web application for visualizing ClickHouse table relationships. I
 3. Access the web interface at http://localhost:8080
 
 ### Manual Setup
+
+Requires Go 1.26 or newer (see `go.mod`).
 
 1. Clone the repository:
    ```bash
@@ -183,7 +186,7 @@ Tear down and re-seed at any time with `docker compose -f docker-compose.clickho
 ```
 clickhouse-schemaflow-visualizer/
 ├── api/                              # HTTP handlers (Gin)
-│   └── handlers.go                   # /api/databases, /api/schema, /api/relationships, /api/table
+│   └── handlers.go                   # /api/connection, /api/databases, /api/columns, /api/dataflow, /api/relationships, /api/table
 ├── assets/                           # Project assets
 │   └── screenshots/                  # Screenshots used in this README
 ├── config/                           # Configuration handling

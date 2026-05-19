@@ -47,7 +47,10 @@ func (h *Handler) GetConnection(c *gin.Context) {
 	})
 }
 
-// GetDatabases returns a list of all databases and their tables
+// GetDatabases returns every visible database with the tables it contains.
+// The underlying client populates an in-memory cache (DatabasesData /
+// TableRelations) on first call and reuses it for every subsequent request
+// until the process restarts.
 func (h *Handler) GetDatabases(c *gin.Context) {
 	databases, err := h.clickhouse.GetDatabases()
 	if err != nil {
@@ -114,7 +117,9 @@ func (h *Handler) GetRelationshipsGraph(c *gin.Context) {
 	c.JSON(http.StatusOK, graph)
 }
 
-// GetTableDetails returns detailed information about the selected table
+// GetTableDetails returns the column list (name, type, default expression, etc.)
+// for the selected table. Used by the inspector panel that opens when a node
+// is clicked in either diagram view.
 func (h *Handler) GetTableDetails(c *gin.Context) {
 	database := c.Param("database")
 	table := c.Param("table")
