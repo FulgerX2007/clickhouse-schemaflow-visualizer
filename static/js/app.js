@@ -415,6 +415,18 @@ function renderTableDetails(details) {
                 <span class="table-info-value">${escapeHtml(details.database)}</span>
                 <span class="table-info-label">engine</span>
                 <span class="table-info-value engine-chip ${engineKey}">${escapeHtml(details.engine)}</span>
+                ${details.primary_key ? `
+                <span class="table-info-label">primary key</span>
+                <span class="table-info-value code">${escapeHtml(details.primary_key)}</span>
+                ` : ''}
+                ${details.sorting_key ? `
+                <span class="table-info-label">order by</span>
+                <span class="table-info-value code">${escapeHtml(details.sorting_key)}</span>
+                ` : ''}
+                ${details.partition_key ? `
+                <span class="table-info-label">partition by</span>
+                <span class="table-info-value code">${escapeHtml(details.partition_key)}</span>
+                ` : ''}
                 <span class="table-info-label">rows</span>
                 <span class="table-info-value numeric">${details.total_rows != null ? formatRows(details.total_rows) : '—'}</span>
                 <span class="table-info-label">size</span>

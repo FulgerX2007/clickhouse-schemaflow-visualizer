@@ -58,12 +58,15 @@ type ColumnInfo struct {
 }
 
 type TableDetails struct {
-	Name       string       `json:"name"`
-	Database   string       `json:"database"`
-	Engine     string       `json:"engine"`
-	TotalRows  *uint64      `json:"total_rows"`
-	TotalBytes *uint64      `json:"total_bytes"`
-	Columns    []ColumnInfo `json:"columns"`
+	Name         string       `json:"name"`
+	Database     string       `json:"database"`
+	Engine       string       `json:"engine"`
+	PrimaryKey   string       `json:"primary_key"`
+	SortingKey   string       `json:"sorting_key"`
+	PartitionKey string       `json:"partition_key"`
+	TotalRows    *uint64      `json:"total_rows"`
+	TotalBytes   *uint64      `json:"total_bytes"`
+	Columns      []ColumnInfo `json:"columns"`
 }
 
 // ColumnRelationship represents a column-to-column mapping
@@ -428,16 +431,16 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 
 	// First get basic table info
 	tableQuery := `
-		SELECT engine, total_rows, total_bytes 
-		FROM system.tables 
+		SELECT engine, total_rows, total_bytes, primary_key, sorting_key, partition_key
+		FROM system.tables
 		WHERE database = ? AND name = ?
 	`
 
-	var engine string
+	var engine, primaryKey, sortingKey, partitionKey string
 	var totalRows, totalBytes *uint64
 
 	row := c.conn.QueryRow(ctx, tableQuery, database, table)
-	if err := row.Scan(&engine, &totalRows, &totalBytes); err != nil {
+	if err := row.Scan(&engine, &totalRows, &totalBytes, &primaryKey, &sortingKey, &partitionKey); err != nil {
 		return nil, fmt.Errorf("failed to get table info: %v", err)
 	}
 
@@ -469,12 +472,15 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 	}
 
 	return &TableDetails{
-		Name:       table,
-		Database:   database,
-		Engine:     engine,
-		TotalRows:  totalRows,
-		TotalBytes: totalBytes,
-		Columns:    columns,
+		Name:         table,
+		Database:     database,
+		Engine:       engine,
+		PrimaryKey:   primaryKey,
+		SortingKey:   sortingKey,
+		PartitionKey: partitionKey,
+		TotalRows:    totalRows,
+		TotalBytes:   totalBytes,
+		Columns:      columns,
 	}, nil
 }
 
