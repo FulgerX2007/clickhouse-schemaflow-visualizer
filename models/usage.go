@@ -585,3 +585,280 @@ func findUnlinkedDistributed(snapshot SchemaSnapshot) []string {
 	sort.Strings(unlinked)
 	return unlinked
 }
+
+// ─── Verdicts ────────────────────────────────────────────────────────────────
+
+// ColumnVerdict is what can be said about one column. Only VerdictUnused
+// licenses dropping it, and it is deliberately the hardest to reach.
+type ColumnVerdict string
+
+const (
+	// VerdictUsed means something reads the column: a dashboard, a view
+	// downstream of it, or ClickHouse itself through a storage key.
+	VerdictUsed ColumnVerdict = "used"
+	// VerdictUnused means the table is read, every query that reads it was fully
+	// understood, and none of them named this column.
+	VerdictUnused ColumnVerdict = "unused"
+	// VerdictUnknown means the table is read but at least one of those queries
+	// could not be enumerated, so no claim is made.
+	VerdictUnknown ColumnVerdict = "unknown"
+	// VerdictNoCoverage means nothing observed reads the table at all, which is
+	// not evidence that its columns are dead.
+	VerdictNoCoverage ColumnVerdict = "no-coverage"
+)
+
+// Reasons carried on a non-actionable verdict.
+const (
+	ReasonNoDashboard        = "no-dashboard-reads-this-table"
+	ReasonGrafanaUnavailable = "grafana-usage-not-available"
+	ReasonDistributed        = "distributed-wrapper-judge-the-local-table"
+	ReasonUnlinkedWrapper    = "distributed-wrapper-has-no-resolvable-local-table"
+	ReasonViaLineage         = "read-through-lineage"
+)
+
+// ColumnUsage is one column's verdict and the evidence behind it.
+type ColumnUsage struct {
+	Column  string        `json:"column"`
+	Type    string        `json:"type"`
+	Verdict ColumnVerdict `json:"verdict"`
+	Reason  string        `json:"reason,omitempty"`
+	// Direct references read this table itself; derived ones arrived through a
+	// Distributed wrapper or a materialized view.
+	Direct  []UsageRef `json:"direct,omitempty"`
+	Derived []UsageRef `json:"derived,omitempty"`
+}
+
+// TableUsage is the inspector payload for one table.
+type TableUsage struct {
+	Database     string        `json:"database"`
+	Table        string        `json:"table"`
+	Engine       string        `json:"engine"`
+	Columns      []ColumnUsage `json:"columns"`
+	Dashboards   []UsageRef    `json:"dashboards"`
+	UsedCount    int           `json:"used_count"`
+	UnusedCount  int           `json:"unused_count"`
+	UnknownCount int           `json:"unknown_count"`
+}
+
+// BuildTableUsage assigns a verdict to every column of one table.
+//
+// state gates the whole thing: unless the scan actually completed, every column
+// is no-coverage. A Grafana that is switched off, still scanning or unreachable
+// produces exactly the same evidence as a Grafana in which nothing is used, and
+// the difference between those two is the difference between a safe schema
+// change and a broken dashboard.
+func BuildTableUsage(snapshot SchemaSnapshot, index UsageIndex, state GrafanaState, table string) TableUsage {
+	database, name := splitQualified(table)
+	usage := TableUsage{Database: database, Table: name, Engine: snapshot.Engines[table]}
+
+	if state == GrafanaStateOK {
+		usage.Dashboards = index.TableRefs(table)
+	}
+
+	keys := snapshot.Keys[table]
+	distributed := ClassifyEngine(snapshot.Engines[table]) == EngineDistributed
+	unlinked := false
+	for _, wrapper := range index.UnlinkedDistributed() {
+		if wrapper == table {
+			unlinked = true
+		}
+	}
+	opaque, opaqueReason := index.IsOpaque(table)
+	referenced := len(index.TableRefs(table)) > 0
+
+	for _, column := range snapshot.Columns[table] {
+		entry := ColumnUsage{Column: column.Name, Type: column.Type}
+
+		for _, ref := range index.Columns(table, column.Name) {
+			if ref.Via == "" {
+				entry.Direct = append(entry.Direct, ref)
+			} else {
+				entry.Derived = append(entry.Derived, ref)
+			}
+		}
+
+		entry.Verdict, entry.Reason = columnVerdict(verdictInputs{
+			state:         state,
+			hasDirect:     len(entry.Direct) > 0,
+			hasDerived:    len(entry.Derived) > 0,
+			referenced:    referenced,
+			opaque:        opaque,
+			opaqueReason:  opaqueReason,
+			isKey:         keys.Contains(column.Name),
+			keyRole:       keys.Role(column.Name),
+			isDistributed: distributed,
+			unlinked:      unlinked,
+		})
+
+		switch entry.Verdict {
+		case VerdictUsed:
+			usage.UsedCount++
+		case VerdictUnused:
+			usage.UnusedCount++
+		case VerdictUnknown:
+			usage.UnknownCount++
+		}
+		usage.Columns = append(usage.Columns, entry)
+	}
+
+	return usage
+}
+
+// verdictInputs is everything one column's verdict depends on.
+type verdictInputs struct {
+	state         GrafanaState
+	hasDirect     bool
+	hasDerived    bool
+	referenced    bool
+	opaque        bool
+	opaqueReason  string
+	isKey         bool
+	keyRole       string
+	isDistributed bool
+	unlinked      bool
+}
+
+// columnVerdict applies the rules in one place, in priority order.
+func columnVerdict(in verdictInputs) (ColumnVerdict, string) {
+	// Without a completed scan there is no evidence at all, only absence of it.
+	if in.state != GrafanaStateOK {
+		return VerdictNoCoverage, ReasonGrafanaUnavailable
+	}
+
+	if in.hasDirect {
+		return VerdictUsed, ""
+	}
+	if in.hasDerived {
+		return VerdictUsed, ReasonViaLineage
+	}
+
+	// A key column is read by the storage engine whatever the dashboards do, and
+	// ALTER TABLE … DROP COLUMN refuses to remove it. Presenting it as unused
+	// would be recommending an impossible change.
+	if in.isKey {
+		return VerdictUsed, in.keyRole
+	}
+
+	// A wrapper whose local table could not be identified hides everything
+	// behind it.
+	if in.unlinked {
+		return VerdictUnknown, ReasonUnlinkedWrapper
+	}
+	// A Distributed table stores nothing of its own; the question belongs to the
+	// local table it fronts.
+	if in.isDistributed {
+		return VerdictUnknown, ReasonDistributed
+	}
+
+	if !in.referenced {
+		return VerdictNoCoverage, ReasonNoDashboard
+	}
+	// The table is read, but at least one of those queries could not be
+	// enumerated, so this column's absence proves nothing.
+	if in.opaque {
+		return VerdictUnknown, in.opaqueReason
+	}
+
+	return VerdictUnused, ""
+}
+
+// ─── Unused report ───────────────────────────────────────────────────────────
+
+// UnusedReportRow is one row of the cross-schema report.
+type UnusedReportRow struct {
+	Database   string        `json:"database"`
+	Table      string        `json:"table"`
+	Engine     string        `json:"engine"`
+	Column     string        `json:"column"`
+	Type       string        `json:"type"`
+	Verdict    ColumnVerdict `json:"verdict"`
+	Reason     string        `json:"reason,omitempty"`
+	Dashboards int           `json:"dashboards"`
+}
+
+// UnusedReportFilters narrows the report.
+type UnusedReportFilters struct {
+	Database string
+	Verdict  string
+}
+
+// UnusedReport is the report plus the caveats a reader needs to judge it.
+type UnusedReport struct {
+	Rows []UnusedReportRow `json:"rows"`
+	// Caveats names conditions that limit the report's reach.
+	Caveats []string `json:"caveats,omitempty"`
+	Totals  struct {
+		Used       int `json:"used"`
+		Unused     int `json:"unused"`
+		Unknown    int `json:"unknown"`
+		NoCoverage int `json:"no_coverage"`
+	} `json:"totals"`
+}
+
+// BuildUnusedReport walks every table and collects column verdicts.
+//
+// Distributed tables are skipped entirely: they store nothing of their own, so a
+// column of one is never the thing you drop. Rows come out ordered by database,
+// table and column position, so the report is stable between refreshes.
+func BuildUnusedReport(snapshot SchemaSnapshot, index UsageIndex, state GrafanaState, filters UnusedReportFilters) UnusedReport {
+	report := UnusedReport{Rows: []UnusedReportRow{}}
+
+	for _, table := range snapshot.Tables() {
+		if ClassifyEngine(snapshot.Engines[table]) == EngineDistributed {
+			continue
+		}
+
+		usage := BuildTableUsage(snapshot, index, state, table)
+		if filters.Database != "" && !strings.EqualFold(filters.Database, usage.Database) {
+			continue
+		}
+
+		dashboards := len(usage.Dashboards)
+		for _, column := range usage.Columns {
+			switch column.Verdict {
+			case VerdictUsed:
+				report.Totals.Used++
+			case VerdictUnused:
+				report.Totals.Unused++
+			case VerdictUnknown:
+				report.Totals.Unknown++
+			case VerdictNoCoverage:
+				report.Totals.NoCoverage++
+			}
+
+			if filters.Verdict != "" && string(column.Verdict) != filters.Verdict {
+				continue
+			}
+			report.Rows = append(report.Rows, UnusedReportRow{
+				Database:   usage.Database,
+				Table:      usage.Table,
+				Engine:     usage.Engine,
+				Column:     column.Column,
+				Type:       column.Type,
+				Verdict:    column.Verdict,
+				Reason:     column.Reason,
+				Dashboards: dashboards,
+			})
+		}
+	}
+
+	report.Caveats = reportCaveats(index, state)
+	return report
+}
+
+// reportCaveats states plainly what the report cannot see.
+func reportCaveats(index UsageIndex, state GrafanaState) []string {
+	caveats := []string{
+		"Reflects Grafana dashboards only. Ad-hoc queries, applications and scheduled jobs are invisible to it.",
+	}
+	if state != GrafanaStateOK {
+		caveats = append(caveats,
+			"No dashboard scan has completed, so no column can be judged unused.")
+	}
+	if wrappers := index.UnlinkedDistributed(); len(wrappers) > 0 {
+		caveats = append(caveats, fmt.Sprintf(
+			"%d Distributed table(s) have no resolvable local table, so nothing behind them was judged: %s",
+			len(wrappers), strings.Join(wrappers, ", ")))
+	}
+	return caveats
+}

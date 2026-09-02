@@ -772,14 +772,41 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 **Files:**
 - Modify: `models/usage.go`, `models/usage_test.go`
 
-- [ ] assign `used` / `unused` / `unknown` / `no-coverage` per the decision-3 table, with a `Reason` string on every non-`used` verdict
-- [ ] require `exact` confidence for `unused`; a heuristic-resolved query downgrades that table's unmatched columns to `unknown`
-- [ ] downgrade to `unknown` on `SelectStar` or `UnknownVar` or a non-empty `ParseError` touching the table
-- [ ] exclude from `unused`: primary/sorting/partition-key columns (`Reason: "sorting-key"` etc.), every column of a `Distributed` table, and local tables behind an edgeless Distributed wrapper
-- [ ] force `no-coverage` for every column when the scan state is `disabled`, `scanning` or `error` — never `unused`
-- [ ] implement `BuildUnusedReport(idx, filters)` with database / verdict / min-confidence filters and stable ordering
-- [ ] write tests for each of the four verdicts, the star and heuristic downgrades, every key-column exclusion, the Distributed exclusion, the disabled/scanning/errored cases, and the report filters
-- [ ] run tests — must pass before task 11
+- [x] assign `used` / `unused` / `unknown` / `no-coverage`, with a `Reason` on every verdict that is not plain `used`
+- [x] a fallback-resolved query downgrades that table's unmatched columns to `unknown`
+- [x] downgrade to `unknown` on `SelectStar`, a variable column, or a non-empty `ParseError` touching the table
+- [x] exclude from `unused`: primary/sorting/partition-key columns, every column of a `Distributed` table, and tables behind an edgeless Distributed wrapper
+- [x] force `no-coverage` for every column when the scan state is `disabled`, `scanning` or `error` — never `unused`
+- [x] implement `BuildUnusedReport` with database and verdict filters, stable ordering, totals and caveats
+- [x] write tests for each of the four verdicts, the star and fallback downgrades, key-column exclusion, the Distributed exclusion, the disabled/scanning/errored cases, and the report filters
+- [x] run tests — must pass before task 11
+
+**Task 10 notes**
+
+- **A key column is `used`, with the key role as its reason — not excluded from the report.** The plan
+  said to exclude primary/sorting/partition-key columns from `unused`, which left open what verdict
+  they *do* get. `used` is the honest one: ClickHouse reads them for storage whatever the dashboards
+  do, and `ALTER TABLE … DROP COLUMN` refuses to remove them. Calling such a column `unused` would be
+  recommending an impossible change; hiding it would leave the reader wondering where it went.
+- **The `exact`-confidence rule resolved into the opacity rule, and the distinction matters.** There
+  are two sources of heuristic confidence and only one of them threatens a false `unused`:
+  - the **fallback resolver**, which runs only after a parse failure and may miss a column reached
+    through an alias or a macro. It always leaves a `ParseError`, which is already recorded as
+    `unparsed-query` opacity, and opacity forces `unknown`. Covered.
+  - an **unqualified column in a multi-table AST query**, which is attributed to *every* candidate.
+    Here the whole query was read; only the owner is uncertain. It over-attributes usage and can never
+    hide a column, so it does not downgrade anything.
+
+  Applying the plan's literal wording would have poisoned every joined table's verdicts for no safety
+  gain. The intent — "the fallback may not have seen everything" — is what is implemented.
+- `Direct` and `Derived` references are separated on each column, so the inspector can say *how* a
+  column is reached: a dashboard reading this table, or one reading a Distributed wrapper or a view
+  downstream of it.
+- `BuildUnusedReport` skips `Distributed` tables outright — they store nothing of their own, so a
+  column of one is never the thing you drop — and returns `Caveats` alongside the rows: the
+  Grafana-only scope always, plus the missing-scan and unlinked-wrapper conditions when they apply.
+  Totals count every column, not just the filtered rows, so a filtered view still shows the shape of
+  the whole schema.
 
 ### Task 11: Scan orchestration, cache warming, TTL and refresh debounce
 

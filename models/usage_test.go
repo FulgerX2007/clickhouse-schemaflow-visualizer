@@ -525,3 +525,279 @@ func TestLinkedDistributedIsNotReportedAsUnlinked(t *testing.T) {
 		t.Errorf("UnlinkedDistributed = %v, want none", got)
 	}
 }
+
+// ─── Verdicts ────────────────────────────────────────────────────────────────
+
+func verdictOf(usage TableUsage, column string) (ColumnVerdict, string) {
+	for _, entry := range usage.Columns {
+		if entry.Column == column {
+			return entry.Verdict, entry.Reason
+		}
+	}
+	return "", "missing"
+}
+
+func TestColumnVerdicts(t *testing.T) {
+	snapshot := testSnapshot()
+
+	index := BuildUsageIndex(snapshot, []ResolvedQuery{
+		query(snapshot, panelRef("d", 1), "SELECT amount FROM shop.orders"),
+	})
+	usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "shop.orders")
+
+	tests := []struct {
+		column  string
+		verdict ColumnVerdict
+		reason  string
+	}{
+		{column: "amount", verdict: VerdictUsed},
+		// note is the only column that is genuinely droppable: the table is read,
+		// the query was fully understood, and nothing names it.
+		{column: "note", verdict: VerdictUnused},
+		// The rest are storage keys, which ALTER TABLE … DROP COLUMN refuses.
+		{column: "id", verdict: VerdictUsed, reason: "primary-key"},
+		{column: "created_at", verdict: VerdictUsed, reason: "sorting-key"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.column, func(t *testing.T) {
+			verdict, reason := verdictOf(usage, tt.column)
+			if verdict != tt.verdict {
+				t.Errorf("verdict = %q, want %q", verdict, tt.verdict)
+			}
+			if reason != tt.reason {
+				t.Errorf("reason = %q, want %q", reason, tt.reason)
+			}
+		})
+	}
+
+	if usage.UnusedCount != 2 {
+		// note and customer_id: customer_id is not a key and is not read.
+		t.Errorf("UnusedCount = %d, want 2", usage.UnusedCount)
+	}
+}
+
+// Nothing reads the table at all, which is not evidence that its columns are
+// dead.
+func TestVerdictNoCoverageWhenNothingReadsTheTable(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, nil)
+
+	usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "shop.customers")
+
+	verdict, reason := verdictOf(usage, "name")
+	if verdict != VerdictNoCoverage {
+		t.Errorf("verdict = %q, want %q", verdict, VerdictNoCoverage)
+	}
+	if reason != ReasonNoDashboard {
+		t.Errorf("reason = %q, want %q", reason, ReasonNoDashboard)
+	}
+	if usage.UnusedCount != 0 {
+		t.Errorf("UnusedCount = %d, want 0 — an unmonitored table has no dead columns", usage.UnusedCount)
+	}
+}
+
+// The table is read, but a query touching it could not be enumerated, so a
+// column's absence proves nothing.
+func TestVerdictUnknownOnOpaqueQueries(t *testing.T) {
+	snapshot := testSnapshot()
+
+	tests := []struct {
+		name   string
+		sql    string
+		reason string
+	}{
+		{name: "star", sql: "SELECT * FROM shop.orders", reason: "select-star"},
+		{name: "unparsed", sql: "SELECT amount FROM shop.orders WHERE (((", reason: "unparsed-query"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index := BuildUsageIndex(snapshot, []ResolvedQuery{query(snapshot, panelRef("d", 1), tt.sql)})
+			usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "shop.orders")
+
+			verdict, reason := verdictOf(usage, "note")
+			if verdict != VerdictUnknown {
+				t.Errorf("verdict = %q, want %q", verdict, VerdictUnknown)
+			}
+			if reason != tt.reason {
+				t.Errorf("reason = %q, want %q", reason, tt.reason)
+			}
+			if usage.UnusedCount != 0 {
+				t.Errorf("UnusedCount = %d, want 0", usage.UnusedCount)
+			}
+		})
+	}
+}
+
+// The single most dangerous failure mode: a Grafana that is off, still scanning
+// or unreachable produces exactly the evidence of a Grafana in which nothing is
+// used.
+func TestVerdictNoCoverageUnlessTheScanCompleted(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, []ResolvedQuery{
+		query(snapshot, panelRef("d", 1), "SELECT amount FROM shop.orders"),
+	})
+
+	for _, state := range []GrafanaState{GrafanaStateDisabled, GrafanaStateScanning, GrafanaStateError} {
+		t.Run(string(state), func(t *testing.T) {
+			usage := BuildTableUsage(snapshot, index, state, "shop.orders")
+
+			for _, column := range usage.Columns {
+				if column.Verdict != VerdictNoCoverage {
+					t.Errorf("column %q verdict = %q, want %q", column.Column, column.Verdict, VerdictNoCoverage)
+				}
+			}
+			if usage.UnusedCount != 0 {
+				t.Errorf("UnusedCount = %d, want 0 — nothing may be called droppable", usage.UnusedCount)
+			}
+			if len(usage.Dashboards) != 0 {
+				t.Errorf("dashboards were reported despite state %q", state)
+			}
+		})
+	}
+}
+
+// A column reached only through a Distributed wrapper or a view is used, and
+// says how.
+func TestVerdictUsedThroughLineage(t *testing.T) {
+	snapshot := distributedSnapshot()
+	index := BuildUsageIndex(snapshot, []ResolvedQuery{
+		{Source: panelRef("d", 1), Result: ResolveQuery(
+			"SELECT callID FROM probe.siplog_distributed", nil, "probe", 200, snapshot.Lookup())},
+	})
+
+	usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "probe.siplog")
+
+	verdict, reason := verdictOf(usage, "callID")
+	if verdict != VerdictUsed || reason != ReasonViaLineage {
+		t.Errorf("verdict = %q reason = %q, want used via lineage", verdict, reason)
+	}
+}
+
+// A Distributed table stores nothing of its own, so a column of one is never the
+// thing you drop.
+func TestVerdictDistributedIsNeverUnused(t *testing.T) {
+	snapshot := distributedSnapshot()
+	index := BuildUsageIndex(snapshot, []ResolvedQuery{
+		{Source: panelRef("d", 1), Result: ResolveQuery(
+			"SELECT callID FROM probe.siplog_distributed", nil, "probe", 200, snapshot.Lookup())},
+	})
+
+	usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "probe.siplog_distributed")
+
+	verdict, reason := verdictOf(usage, "unused_col")
+	if verdict != VerdictUnknown || reason != ReasonDistributed {
+		t.Errorf("verdict = %q reason = %q, want unknown/distributed", verdict, reason)
+	}
+	if usage.UnusedCount != 0 {
+		t.Errorf("UnusedCount = %d, want 0", usage.UnusedCount)
+	}
+}
+
+func TestVerdictUnlinkedWrapperHidesEverythingBehindIt(t *testing.T) {
+	snapshot := SchemaSnapshot{
+		Columns:     map[string][]ColumnInfo{"db.orphan_distributed": {{Name: "x"}}},
+		Keys:        map[string]TableKeys{},
+		ViewQueries: map[string]string{},
+		Engines:     map[string]string{"db.orphan_distributed": "Distributed"},
+	}
+	index := BuildUsageIndex(snapshot, nil)
+
+	usage := BuildTableUsage(snapshot, index, GrafanaStateOK, "db.orphan_distributed")
+
+	verdict, reason := verdictOf(usage, "x")
+	if verdict != VerdictUnknown || reason != ReasonUnlinkedWrapper {
+		t.Errorf("verdict = %q reason = %q, want unknown/unlinked", verdict, reason)
+	}
+}
+
+// ─── Report ──────────────────────────────────────────────────────────────────
+
+func TestBuildUnusedReport(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, []ResolvedQuery{
+		query(snapshot, panelRef("d", 1), "SELECT amount FROM shop.orders"),
+	})
+
+	report := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{Verdict: string(VerdictUnused)})
+
+	for _, row := range report.Rows {
+		if row.Verdict != VerdictUnused {
+			t.Errorf("filter leaked a %q row", row.Verdict)
+		}
+		// Distributed tables never appear: they store nothing of their own.
+		if ClassifyEngine(row.Engine) == EngineDistributed {
+			t.Errorf("a Distributed table reached the report: %+v", row)
+		}
+	}
+
+	columns := []string{}
+	for _, row := range report.Rows {
+		columns = append(columns, row.Table+"."+row.Column)
+	}
+	sort.Strings(columns)
+	if strings.Join(columns, ",") != "orders.customer_id,orders.note" {
+		t.Errorf("unused rows = %v, want only the two droppable columns", columns)
+	}
+
+	if report.Totals.Unused != 2 {
+		t.Errorf("Totals.Unused = %d, want 2", report.Totals.Unused)
+	}
+	// Totals count every column, not only the filtered rows.
+	if report.Totals.Used == 0 || report.Totals.NoCoverage == 0 {
+		t.Errorf("totals look wrong: %+v", report.Totals)
+	}
+}
+
+func TestBuildUnusedReportDatabaseFilter(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, nil)
+
+	report := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{Database: "traffic"})
+
+	if len(report.Rows) == 0 {
+		t.Fatal("the filter excluded everything")
+	}
+	for _, row := range report.Rows {
+		if row.Database != "traffic" {
+			t.Errorf("filter leaked %s.%s", row.Database, row.Table)
+		}
+	}
+}
+
+func TestBuildUnusedReportIsStablyOrdered(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, nil)
+
+	first := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{})
+	second := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{})
+
+	if len(first.Rows) != len(second.Rows) {
+		t.Fatalf("row counts differ: %d vs %d", len(first.Rows), len(second.Rows))
+	}
+	for i := range first.Rows {
+		if first.Rows[i] != second.Rows[i] {
+			t.Fatalf("row %d differs between runs:\n%+v\n%+v", i, first.Rows[i], second.Rows[i])
+		}
+	}
+}
+
+// The report has to say what it cannot see, or a reader will over-trust it.
+func TestBuildUnusedReportCaveats(t *testing.T) {
+	snapshot := testSnapshot()
+	index := BuildUsageIndex(snapshot, nil)
+
+	ok := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{})
+	if len(ok.Caveats) == 0 || !strings.Contains(ok.Caveats[0], "Grafana dashboards only") {
+		t.Errorf("caveats = %v, want the scope stated", ok.Caveats)
+	}
+
+	stale := BuildUnusedReport(snapshot, index, GrafanaStateError, UnusedReportFilters{})
+	if !containsMatch(stale.Caveats, "No dashboard scan has completed") {
+		t.Errorf("caveats = %v, want the missing scan called out", stale.Caveats)
+	}
+	if stale.Totals.Unused != 0 {
+		t.Errorf("Totals.Unused = %d, want 0 without a completed scan", stale.Totals.Unused)
+	}
+}
