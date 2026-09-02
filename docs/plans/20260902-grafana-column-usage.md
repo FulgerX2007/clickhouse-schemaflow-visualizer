@@ -710,12 +710,25 @@ dashboards=167 queries=1177 parsed=1089 (92.5%) refs exact=5994 heuristic=964
 `conn` field, and `NewClickHouseClient` pings on construction. There is no interface anywhere in the
 repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 
-- [ ] define `SchemaSnapshot`, `TableKeys`, `ColumnUsage`, `UsageRef`, `TableUsage` as **pure data** in `models/usage.go` — no client, no I/O
-- [ ] add `LoadSchemaSnapshot(c *ClickHouseClient) (SchemaSnapshot, error)`: `BuildColumnIndex()` for columns (**one** query) plus **one** `SELECT database, name, engine, primary_key, sorting_key, partition_key FROM system.tables` for keys and engines — not `GetTableColumns` per table (that would be ~350 round trips across 175 tables)
-- [ ] keep the new query's database filter identical to `allowedDatabase()` / `BuildColumnIndex`'s `NOT IN` list (rule 4 — they must change together)
-- [ ] parse `sorting_key` / `primary_key` / `partition_key` expressions into a column-name set (they are expressions, e.g. `toYYYYMM(ts)`, not bare names — extract identifiers)
-- [ ] write tests for `SchemaSnapshot` construction from literals and for key-expression parsing (bare name, function-wrapped, tuple, empty)
-- [ ] run tests — must pass before task 9
+- [x] define `SchemaSnapshot`, `TableKeys` as **pure data** in `models/usage.go` — no client, no I/O
+- [x] add `LoadSchemaSnapshot(c *ClickHouseClient) (SchemaSnapshot, error)`: `BuildColumnIndex()` for columns (**one** query) plus **one** `SELECT database, name, engine, primary_key, sorting_key, partition_key FROM system.tables` for keys and engines — not `GetTableColumns` per table (that would be ~350 round trips across 175 tables)
+- [x] keep the new query's database filter identical to `allowedDatabase()` / `BuildColumnIndex`'s `NOT IN` list (rule 4 — they must change together)
+- [x] parse `sorting_key` / `primary_key` / `partition_key` expressions into a column-name set (they are expressions, e.g. `toYYYYMM(ts)`, not bare names — extract identifiers)
+- [x] write tests for `SchemaSnapshot` construction from literals and for key-expression parsing (bare name, function-wrapped, tuple, empty)
+- [x] run tests — must pass before task 9
+
+**Task 8 notes**
+
+- `ColumnUsage` / `UsageRef` / `TableUsage` are deferred to Task 9, where the code that populates them
+  lands. Defining them here with no producer would have been dead weight.
+- `SchemaSnapshot` carries `Columns`, `Keys`, `Engines` and `Relations`, and exposes three seams:
+  `Lookup()` adapts it to the resolver's `ColumnLookup`, `MatchTables()` resolves a reference —
+  pattern or plain — to concrete tables, and `Tables()` iterates deterministically.
+- `ParseKeyExpression` treats every identifier that is not a known wrapper function as a column, which
+  errs toward *protecting* a column from an unused verdict. The wrapper list covers the usual
+  `toYYYYMM`, `cityHash64`, `tuple`, `intDiv` and friends.
+- The two queries are both `SELECT`s against `system.columns` and `system.tables`, so rule 1 holds.
+  The database filter is copied verbatim from `BuildColumnIndex`; rule 4 binds the three together.
 
 ### Task 9: Usage index with per-engine lineage propagation
 
