@@ -11,14 +11,12 @@ import (
 type Handler struct {
 	clickhouse *models.ClickHouseClient
 	config     models.Config
-	grafana    models.GrafanaStatus
+	grafana    *models.GrafanaIndex
 }
 
-// NewHandler creates a new Handler instance. grafana carries the dashboard-source
-// status; a zero value is not valid — pass models.NewGrafanaStatus even when the
-// feature is off, so the status endpoint reports "disabled" rather than an empty
-// state string.
-func NewHandler(clickhouse *models.ClickHouseClient, config models.Config, grafana models.GrafanaStatus) *Handler {
+// NewHandler creates a new Handler instance. grafana may be nil, which every
+// Grafana endpoint reports as "disabled" rather than as an error.
+func NewHandler(clickhouse *models.ClickHouseClient, config models.Config, grafana *models.GrafanaIndex) *Handler {
 	return &Handler{
 		clickhouse: clickhouse,
 		config:     config,
@@ -49,7 +47,7 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 // error status, so the frontend has a single unambiguous branch and a switched-off
 // integration does not look like a server fault.
 func (h *Handler) GetGrafanaStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, h.grafana)
+	c.JSON(http.StatusOK, h.grafana.Status())
 }
 
 // GetConnection returns the host, port, and TLS mode the server is connected

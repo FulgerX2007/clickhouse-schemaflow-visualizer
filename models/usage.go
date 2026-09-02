@@ -175,9 +175,16 @@ func LoadSchemaSnapshot(client *ClickHouseClient) (SchemaSnapshot, error) {
 		return snapshot, err
 	}
 
-	// The relation cache is filled lazily by getTablesRelations; the caller is
-	// responsible for warming it before this point.
-	snapshot.Relations = append(snapshot.Relations, TableRelations...)
+	// getTablesRelations is lazy — nothing in main.go calls it, and it fires on
+	// the first /api/databases or /api/dataflow request. A scan that ran before
+	// any of those would index against nil relations and silently report that
+	// nothing is connected to anything, so warm it here rather than hoping a user
+	// clicked something first. It caches, so a later call is free.
+	relations, err := client.getTablesRelations()
+	if err != nil {
+		return snapshot, fmt.Errorf("failed to warm the relation cache: %w", err)
+	}
+	snapshot.Relations = append(snapshot.Relations, relations...)
 	return snapshot, nil
 }
 

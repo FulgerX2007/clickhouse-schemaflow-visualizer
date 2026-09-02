@@ -31,9 +31,13 @@ verifiable in the cited file.
 
 **1. Never add a write path to ClickHouse.** The app issues `SELECT` only, against
 `system.tables` and `system.columns` (`models/clickhouse.go` `getTablesRelations`,
-`GetTableColumns`, `isDistributedTable`; `models/graph.go` `BuildColumnIndex`). All
-six HTTP routes are `GET` (`api/handlers.go:26-34`). Do not introduce `INSERT`,
-`CREATE`, `ALTER`, `DROP`, `OPTIMIZE`, or any mutating endpoint, even behind a flag.
+`GetTableColumns`, `isDistributedTable`; `models/graph.go` `BuildColumnIndex`;
+`models/usage.go` `loadTableKeys`). Do not introduce `INSERT`, `CREATE`, `ALTER`,
+`DROP`, `OPTIMIZE`, or any mutating ClickHouse statement, even behind a flag.
+
+Every route was `GET` until `POST /api/grafana/refresh`, which mutates only the
+in-process dashboard cache and never ClickHouse. Adding another non-`GET` route needs
+the same justification and the same debounce.
 
 **2. User input reaches SQL only as a bound parameter.** `database`/`table` from the
 URL are passed as `?` arguments (`models/clickhouse.go:442,455,646`;
@@ -84,12 +88,24 @@ to string templating turns metadata into injected markup.
 `addTableToList` strips that `<i …></i>` back out with a regex before re-inserting it
 (`static/js/app.js:233-241`). Change the icon markup and you must change the regex.
 
-**8. Caches are never invalidated.** `DatabasesData`, `TableRelations` and
-`TableMetadata` are package-level vars (`models/clickhouse.go:34-36`) filled on first
-use; a process restart is the only way to pick up schema changes. Do not write code
-that assumes a later request sees fresh data. `GetTableColumns`, `BuildColumnIndex`
-and `isDistributedTable` are uncached and hit ClickHouse per request — keep it that
-way unless you are deliberately changing the caching story, and document it if you do.
+**8. Caches are never invalidated — with one documented exception.**
+`DatabasesData`, `TableRelations` and `TableMetadata` are package-level vars
+(`models/clickhouse.go:34-36`) filled on first use; a process restart is the only way
+to pick up schema changes. Do not write code that assumes a later request sees fresh
+data. `GetTableColumns`, `BuildColumnIndex` and `isDistributedTable` are uncached and
+hit ClickHouse per request — keep it that way unless you are deliberately changing the
+caching story, and document it if you do.
+
+The exception is `models.GrafanaIndex` (`models/grafana_index.go`), which owns the
+Grafana dashboard scan and everything derived from it. It **does** invalidate: it holds
+its state behind a `sync.RWMutex`, honours `GRAFANA_CACHE_TTL`, and rebuilds on
+`POST /api/grafana/refresh`. The TTL doubles as that endpoint's debounce, because the
+HTTP API has no authentication or rate limiting and a refresh costs one request per
+dashboard against Grafana. A failed rescan leaves the previous good index in place
+rather than emptying it — an empty usage index reads as "nothing uses anything", which
+is precisely the conclusion that would get a live column dropped. `LoadSchemaSnapshot`
+warms `getTablesRelations` itself for the same reason: a scan that ran before any
+request would otherwise index against nil relations.
 
 **9. Keep the recursion guard.** `maxRelationDepth = 50`
 (`models/clickhouse.go:16`) bounds `walkForward`/`walkBackward`

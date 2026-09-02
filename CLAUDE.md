@@ -65,7 +65,9 @@ Per-engine parsing branches, all positional string splitting on `create_table_qu
 - `MaterializedView` — two edges: `source → mv` (from `FROM `) and `mv → destination` (from `strings.Split(createQuery, " ")[5]`)
 - anything else — a bare node with no edges
 
-**Caching:** these three vars are populated on first use and never invalidated. The sidebar ↻ button only re-fetches `/api/databases`, which returns the same cached map — a **process restart is the only way to pick up schema changes**. `GetTableColumns`, `BuildColumnIndex`, and `isDistributedTable` are not cached and hit ClickHouse on every call.
+**Caching:** these three vars are populated on first use and never invalidated. The sidebar ↻ button only re-fetches `/api/databases`, which returns the same cached map — a **process restart is the only way to pick up ClickHouse schema changes**. `GetTableColumns`, `BuildColumnIndex`, and `isDistributedTable` are not cached and hit ClickHouse on every call.
+
+The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafana_index.go`), which owns the Grafana dashboard scan: mutex-guarded, TTL'd via `GRAFANA_CACHE_TTL`, and rebuildable through `POST /api/grafana/refresh` (the TTL doubles as that endpoint's debounce). A failed rescan keeps the previous good index rather than emptying it, because an empty usage index reads as "nothing uses anything". `LoadSchemaSnapshot` warms `getTablesRelations` before building, since that cache is otherwise filled lazily by the first `/api/databases` request and a background scan could run before any request arrives.
 
 **Database filtering** is duplicated: `allowedDatabase()` in `clickhouse.go` and a hardcoded `NOT IN (...)` list in `BuildColumnIndex` in `graph.go`. Change both together or the command palette and sidebar disagree.
 

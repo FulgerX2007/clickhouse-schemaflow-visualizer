@@ -813,14 +813,32 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 **Files:**
 - Modify: `models/grafana.go`, `main.go`, `models/grafana_test.go`
 
-- [ ] add `GrafanaIndex` holding dashboards + usage index + scan stats + state behind a mutex
-- [ ] **warm the ClickHouse caches before building the index**: `TableMetadata` and `TableRelations` are filled only by the lazy `getTablesRelations()`, which nothing in `main.go` calls — a startup scan would otherwise index against nil maps and report an empty set. Handle its error by moving to state `error`
-- [ ] scan asynchronously so a slow or hung Grafana never delays the listen call; expose state `scanning` until the first scan completes
-- [ ] honour `GRAFANA_CACHE_TTL`; make it the refresh debounce too (decision 5) — a refresh inside the window returns the current status with `debounced: true`
-- [ ] a failed refresh leaves the previous good index intact and sets `error` alongside the stale `scannedAt`
-- [ ] **document the caching-story change in `CLAUDE.md` and `.ai/rules.md` rule 8** — this plan is the first code that invalidates anything (rule 8 requires it be documented)
-- [ ] write tests for concurrent read-during-refresh, TTL expiry, debounced refresh, failed refresh preserving the prior index, and the nil-cache warm path
-- [ ] run tests — must pass before task 12
+- [x] add `GrafanaIndex` holding dashboards + usage index + scan stats + state behind a mutex
+- [x] **warm the ClickHouse caches before building the index** — done inside `LoadSchemaSnapshot`, which now calls `getTablesRelations()` itself and fails loudly if it errors
+- [x] scan asynchronously so a slow or hung Grafana never delays the listen call; expose state `scanning` until the first scan completes
+- [x] honour `GRAFANA_CACHE_TTL`; make it the refresh debounce too (decision 5)
+- [x] a failed refresh leaves the previous good index intact and sets `error` alongside the stale `scannedAt`
+- [x] **document the caching-story change in `CLAUDE.md` and `.ai/rules.md` rule 8**
+- [x] write tests for concurrent read-during-refresh, TTL expiry, debounced refresh, failed refresh preserving the prior index, and the nil-cache warm path
+- [x] run tests — must pass before task 12
+
+**Task 11 notes**
+
+- Cache warming lives in `LoadSchemaSnapshot` rather than in the index, so **any** future caller gets
+  it. `getTablesRelations` caches internally, so the second call costs nothing.
+- `GrafanaIndex` is used through a pointer because it carries a `sync.RWMutex`; everything it holds is
+  still passed by value. `SchemaLoader` and `DashboardSource` are both injected, so the whole
+  orchestration is tested with no ClickHouse and no network.
+- **A nil `*GrafanaIndex` is a valid, fully safe value** — `Status()`, `Refresh()`, `Usage()`,
+  `Report()`, `Start()` and `Enabled()` all handle it. That is what the handlers hold when the feature
+  is off, and it removes a whole class of nil check from the API layer.
+- A failed rescan keeps the previous good index and the previous `scannedAt`, and only flips `state`
+  to `error`. Verdicts then read `no-coverage` because the state is not `ok`, so stale data can never
+  be mistaken for a completed scan — but the dashboards list survives for the UI to show.
+- `.ai/rules.md` rule 8 and rule 1 both amended, and `CLAUDE.md`'s caching paragraph rewritten: this
+  is the first component in the repo that invalidates a cache and the first non-`GET` route.
+- `main.go` now builds the source, constructs the index and calls `Start()`. A source-construction
+  failure logs and disables the feature rather than stopping the process.
 
 ### Task 12: Usage, unused, and refresh endpoints
 

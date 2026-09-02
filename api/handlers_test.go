@@ -14,11 +14,16 @@ import (
 // newTestRouter builds a router with no ClickHouse client. Every Grafana status
 // path is reachable without a database, which is the point of keeping the status
 // derived from configuration alone.
-func newTestRouter(status models.GrafanaStatus) *gin.Engine {
+func newTestRouter(index *models.GrafanaIndex) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, models.Config{}, status).RegisterRoutes(router)
+	NewHandler(nil, models.Config{}, index).RegisterRoutes(router)
 	return router
+}
+
+// disabledIndex is what the handlers hold when no dashboard source is set.
+func disabledIndex() *models.GrafanaIndex {
+	return models.NewGrafanaIndex(models.GrafanaConfig{Mode: models.GrafanaModeDisabled}, nil, nil, "")
 }
 
 func getJSON(t *testing.T, router *gin.Engine, path string) (int, map[string]any) {
@@ -36,7 +41,7 @@ func getJSON(t *testing.T, router *gin.Engine, path string) (int, map[string]any
 }
 
 func TestGetGrafanaStatusDisabled(t *testing.T) {
-	router := newTestRouter(models.NewGrafanaStatus(models.GrafanaConfig{Mode: models.GrafanaModeDisabled}, nil))
+	router := newTestRouter(disabledIndex())
 
 	code, body := getJSON(t, router, "/api/grafana/status")
 
@@ -59,7 +64,7 @@ func TestGetGrafanaStatusDisabled(t *testing.T) {
 
 func TestGetGrafanaStatusConfigured(t *testing.T) {
 	cfg := models.GrafanaConfig{Mode: models.GrafanaModeDir, DashboardsDir: "/dash"}
-	router := newTestRouter(models.NewGrafanaStatus(cfg, nil))
+	router := newTestRouter(models.NewGrafanaIndex(cfg, nil, nil, ""))
 
 	code, body := getJSON(t, router, "/api/grafana/status")
 
@@ -79,7 +84,7 @@ func TestGetGrafanaStatusDoesNotLeakToken(t *testing.T) {
 	const token = "glsa-supersecret-value"
 
 	cfg := models.GrafanaConfig{Mode: models.GrafanaModeAPI, URL: "https://grafana.example", Token: token}
-	router := newTestRouter(models.NewGrafanaStatus(cfg, nil))
+	router := newTestRouter(models.NewGrafanaIndex(cfg, nil, nil, ""))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/grafana/status", nil)
 	rec := httptest.NewRecorder()
@@ -95,7 +100,7 @@ func TestGetGrafanaStatusDoesNotLeakToken(t *testing.T) {
 // registered, and the parameter validation still fires before any query is
 // attempted.
 func TestExistingRoutesStillRegistered(t *testing.T) {
-	router := newTestRouter(models.NewGrafanaStatus(models.GrafanaConfig{}, nil))
+	router := newTestRouter(disabledIndex())
 
 	registered := map[string]bool{}
 	for _, route := range router.Routes() {
@@ -125,7 +130,7 @@ func TestGetConnectionNeverExposesThePassword(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	cfg := models.Config{Host: "ch.example", Port: 9000, User: "reader", Password: "hunter2", Database: "default"}
-	NewHandler(nil, cfg, models.NewGrafanaStatus(models.GrafanaConfig{}, nil)).RegisterRoutes(router)
+	NewHandler(nil, cfg, disabledIndex()).RegisterRoutes(router)
 
 	code, body := getJSON(t, router, "/api/connection")
 

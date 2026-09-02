@@ -71,10 +71,14 @@ func (g GrafanaConfig) Enabled() bool {
 // carries no token field: the status endpoint is the one place where the
 // service-account credential would be easiest to leak by accident.
 type GrafanaStatus struct {
-	State  GrafanaState `json:"state"`
-	Mode   GrafanaMode  `json:"mode,omitempty"`
-	Reason string       `json:"reason,omitempty"`
-	Error  string       `json:"error,omitempty"`
+	State     GrafanaState     `json:"state"`
+	Mode      GrafanaMode      `json:"mode,omitempty"`
+	Reason    string           `json:"reason,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	ScannedAt string           `json:"scanned_at,omitempty"`
+	Stats     GrafanaScanStats `json:"stats"`
+	Warnings  []string         `json:"warnings,omitempty"`
+	Debounced bool             `json:"debounced,omitempty"`
 }
 
 // LoadGrafanaConfig resolves the dashboard source from the environment. getenv
