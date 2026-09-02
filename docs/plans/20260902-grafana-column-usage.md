@@ -866,6 +866,53 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
   building a real one there would need a live ClickHouse and a live Grafana.
 - The route-inventory test now pins all ten routes and separates the six frozen ones from the four new.
 
+## End-to-end validation (after Task 12)
+
+The backend was run for real against the local test stack
+(`docker compose -f docker-compose.clickhouse-test.yml`, seeded from
+`scripts/clickhouse_test_engines.sql`) with a hand-written dashboard directory, exercising every
+engine family the seed provides. **Everything below is observed output, not expected output.**
+
+**Lineage, two hops upstream.** A dashboard queries `aggregated.flight_stats_daily` — a `Distributed`
+wrapper. Usage crosses to `aggregated.flight_stats_daily_local`, then back through the materialized
+view feeding it, to the source columns in `raw.flights_local`:
+
+```
+raw.flights_local  engine=ReplicatedMergeTree
+  flight_id            used         primary-key             via=-
+  flight_number        unused                               via=-
+  airline_code         unused                               via=-
+  origin               used         read-through-lineage    via=mv:aggregated.flight_stats_daily_mv
+  destination          used         read-through-lineage    via=mv:aggregated.flight_stats_daily_mv
+  scheduled_departure  used         read-through-lineage    via=mv:aggregated.flight_stats_daily_mv
+  actual_departure     unused                               via=-
+  delay_minutes        used         read-through-lineage    via=mv:aggregated.flight_stats_daily_mv
+  status               unused                               via=-
+```
+
+No dashboard mentions `raw.flights_local` at all. Without lineage propagation every one of those nine
+columns would have read `no-coverage`, and the four that are genuinely load-bearing would have looked
+as droppable as the four that are not. Note `delay_minutes` is reached through *two* aggregate
+wrappers (`avgState`, `maxState`) and `scheduled_departure` through `toDate(...)`.
+
+**The safety properties, each confirmed against live data:**
+
+| Property | Observed |
+|---|---|
+| a key column is never droppable | `flight_id` → `used` / `primary-key`, though no dashboard names it |
+| a table nothing reads is not "dead" | `aggregated.airport_traffic_hourly_local` → `no-coverage`, `unused` count 0 |
+| a Distributed wrapper is never droppable | `raw.flights` → every column `unknown` / `distributed-wrapper-judge-the-local-table` |
+| the report states its own limits | caveat returned: "Reflects Grafana dashboards only…" |
+| refresh is debounced | `POST /api/grafana/refresh` → `debounced: true` inside the TTL |
+| the six original endpoints are untouched | `/api/dataflow/raw/flights_local` → 6 nodes / 5 edges; `/api/table/...` → 9 columns |
+
+**Disabled path.** Restarted with no `GRAFANA_*` variables at all: `status`, `usage` and `unused` all
+answer `200 {"state":"disabled","reason":"not configured"}` **with no payload**, the six original
+endpoints behave identically, and the process logs nothing about Grafana.
+
+The report found **10 genuinely unused columns** across the seeded schema, with totals
+`used=13 unused=10 unknown=0 no_coverage=12`.
+
 ### Task 13: Inspector — per-column dashboard usage
 
 **Files:**
