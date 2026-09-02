@@ -149,15 +149,15 @@ Requires Go 1.26 or newer (see `go.mod`).
 
 ## 🔧 How It Works
 
-The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers everything once and caches it in memory; click the sidebar **↻** button to refresh.
+The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers every database, table, and relationship in a single pass over `system.tables` and caches the result in memory for the lifetime of the process. The sidebar **↻** button re-renders the tree from that cache, so restart the app to pick up schema changes made after it started.
 
 Relationship discovery is engine-aware:
 - `MergeTree` / `Replicated*MergeTree` — leaf tables; show as the source or sink of a flow.
 - `Distributed` — the `Distributed(...)` engine arguments are parsed to find the underlying local cluster table; the visualizer draws an edge from the local table to its Distributed wrapper.
 - `MaterializedView` — the MV's stored `SELECT` is parsed to find both the source table (`FROM ...`) and the per-column transformation expressions; an edge is drawn from each referenced source column to the corresponding target column, with the expression rendered as the edge label.
-- `Dictionary` — the dictionary's `SOURCE(...)` clause is inspected to link the dictionary back to its underlying table.
+- `Dictionary` — the `loading_dependencies_database` / `loading_dependencies_table` columns of `system.tables` are used to link the dictionary back to its underlying table.
 
-Node IDs in the diagrams use CityHash32 of the fully qualified table name to stay deterministic and collision-resistant across reloads, and column names / expressions are sanitized so anything containing reserved characters still renders.
+Nodes are identified by their fully qualified `database.table` name, so a diagram is stable across reloads. The API returns plain JSON — nodes, edges, columns, and expressions — and the browser builds the SVG from it directly, so table and column names carrying reserved characters need no escaping to render.
 
 ## 🧪 Local test stack
 
@@ -190,9 +190,10 @@ clickhouse-schemaflow-visualizer/
 ├── assets/                           # Project assets
 │   └── screenshots/                  # Screenshots used in this README
 ├── config/                           # Configuration handling
-│   └── config.go                     # Environment configuration loader
+│   └── config.go                     # Environment configuration loader (unused — main.go reads the env directly)
 ├── models/                           # Domain logic
-│   └── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery, diagram model
+│   ├── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery
+│   └── graph.go                      # Graph payloads returned by /api/dataflow, /api/relationships, /api/columns
 ├── scripts/                          # Helper SQL and packaging scripts
 │   └── clickhouse_test_engines.sql   # Seed schema for the local test stack
 ├── static/                           # Embedded frontend
