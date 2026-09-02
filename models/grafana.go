@@ -1,7 +1,12 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -209,4 +214,203 @@ func NewGrafanaStatus(cfg GrafanaConfig, configErr error) GrafanaStatus {
 		status.Reason = configErr.Error()
 	}
 	return status
+}
+
+// ─── Dashboards ──────────────────────────────────────────────────────────────
+
+// grafanaUIDPattern is Grafana's own uid shape. Uids reach the browser inside
+// dashboard deep links, and a dashboard read off disk is no more trustworthy
+// than one read from the API, so both sources validate through the same
+// constructor.
+var grafanaUIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// Dashboard is a Grafana dashboard reduced to what column-usage analysis needs.
+// Panels and Variables are filled by the extraction pass; a source only builds
+// the envelope.
+type Dashboard struct {
+	UID       string
+	Title     string
+	Folder    string
+	Source    string // "api" | "dir"
+	URL       string // deep link, empty when no base URL is configured
+	Panels    []Panel
+	Variables []TemplateVariable
+}
+
+// Panel is one panel and the queries it issues.
+type Panel struct {
+	ID         int
+	Title      string
+	Type       string
+	Queries    []string
+	RefPanelID int // "-- Dashboard --" source panel, 0 when the panel has its own queries
+}
+
+// TemplateVariable is a dashboard variable. Values feeds ${var} expansion, which
+// is what makes table names like agg_${period}_distributed resolvable.
+type TemplateVariable struct {
+	Name   string
+	Query  string
+	Values []string
+}
+
+// DashboardScan is the result of one pass over a source. Skipped and Warnings
+// are carried rather than logged and forgotten: a scan that silently dropped
+// half its dashboards would look exactly like a Grafana in which half the
+// columns are unused.
+type DashboardScan struct {
+	Dashboards []Dashboard
+	Skipped    int
+	Warnings   []string
+}
+
+// maxScanWarnings bounds what a single bad directory can accumulate; the count
+// keeps rising after the list stops.
+const maxScanWarnings = 50
+
+func (s DashboardScan) withSkip(format string, args ...any) DashboardScan {
+	s.Skipped++
+	if len(s.Warnings) < maxScanWarnings {
+		s.Warnings = append(s.Warnings, fmt.Sprintf(format, args...))
+	}
+	return s
+}
+
+// DashboardSource supplies dashboards from somewhere — the Grafana API or a
+// directory of JSON files. Everything downstream consumes DashboardScan and does
+// not know which it got.
+type DashboardSource interface {
+	Dashboards() (DashboardScan, error)
+}
+
+// newDashboard builds the envelope shared by both sources, rejecting a uid that
+// does not match Grafana's own shape.
+func newDashboard(uid, title, folder, source, baseURL string) (Dashboard, error) {
+	uid = strings.TrimSpace(uid)
+	if !grafanaUIDPattern.MatchString(uid) {
+		return Dashboard{}, fmt.Errorf("invalid dashboard uid %q", uid)
+	}
+
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = uid
+	}
+
+	dashboard := Dashboard{UID: uid, Title: title, Folder: folder, Source: source}
+	if base := strings.TrimRight(strings.TrimSpace(baseURL), "/"); base != "" {
+		dashboard.URL = base + "/d/" + uid
+	}
+	return dashboard, nil
+}
+
+// dashboardEnvelope covers the two shapes a dashboard file comes in: the bare
+// dashboard object, and the {"dashboard": …, "meta": …} wrapper the API returns
+// and the export button writes.
+type dashboardEnvelope struct {
+	Dashboard json.RawMessage `json:"dashboard"`
+	Meta      struct {
+		FolderTitle string `json:"folderTitle"`
+	} `json:"meta"`
+}
+
+// rawDashboard is the subset of the dashboard object this pass reads. The panel
+// and templating payloads are decoded by the extraction pass.
+type rawDashboard struct {
+	UID   string `json:"uid"`
+	Title string `json:"title"`
+}
+
+// dirSource reads dashboards from a directory tree of JSON files. It needs no
+// credentials, which is what makes it usable against a provisioned dashboard
+// repository.
+type dirSource struct {
+	dir     string
+	baseURL string
+}
+
+func newDirSource(dir, baseURL string) dirSource {
+	return dirSource{dir: dir, baseURL: baseURL}
+}
+
+// Dashboards walks the directory tree. A missing or unreadable directory is a
+// hard error — reporting zero dashboards for a mistyped path would present as
+// "no dashboard uses anything", which is the one conclusion this feature must
+// never reach by accident. Individual bad files are skipped and counted.
+func (s dirSource) Dashboards() (DashboardScan, error) {
+	info, err := os.Stat(s.dir)
+	if err != nil {
+		return DashboardScan{}, fmt.Errorf("grafana dashboards directory %q: %w", s.dir, err)
+	}
+	if !info.IsDir() {
+		return DashboardScan{}, fmt.Errorf("grafana dashboards path %q is not a directory", s.dir)
+	}
+
+	scan := DashboardScan{}
+	// Grafana keys dashboards by uid, so a provisioning tree that holds the same
+	// dashboard in two folders still has one dashboard. Keeping both would
+	// double-count every column they read and list the dashboard twice in the UI.
+	// WalkDir yields lexical order, so first-wins is deterministic.
+	seen := map[string]string{}
+
+	walkErr := filepath.WalkDir(s.dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			scan = scan.withSkip("%s: %v", path, err)
+			return nil
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+			return nil
+		}
+
+		dashboard, loadErr := s.load(path)
+		if loadErr != nil {
+			scan = scan.withSkip("%s: %v", path, loadErr)
+			return nil
+		}
+		if first, duplicate := seen[dashboard.UID]; duplicate {
+			scan = scan.withSkip("%s: duplicate dashboard uid %q, already loaded from %s", path, dashboard.UID, first)
+			return nil
+		}
+
+		seen[dashboard.UID] = path
+		scan.Dashboards = append(scan.Dashboards, dashboard)
+		return nil
+	})
+	if walkErr != nil {
+		return scan, fmt.Errorf("walk grafana dashboards directory %q: %w", s.dir, walkErr)
+	}
+
+	return scan, nil
+}
+
+// load reads one dashboard file in either envelope shape.
+func (s dirSource) load(path string) (Dashboard, error) {
+	content, err := os.ReadFile(path) //nolint:gosec // operator-configured dashboard directory
+	if err != nil {
+		return Dashboard{}, err
+	}
+
+	envelope := dashboardEnvelope{}
+	if err := json.Unmarshal(content, &envelope); err != nil {
+		return Dashboard{}, fmt.Errorf("not valid JSON: %w", err)
+	}
+
+	body := envelope.Dashboard
+	if len(body) == 0 {
+		body = content // bare dashboard object
+	}
+
+	raw := rawDashboard{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return Dashboard{}, fmt.Errorf("not a dashboard object: %w", err)
+	}
+
+	folder := envelope.Meta.FolderTitle
+	if folder == "" {
+		// Provisioned trees carry the folder in the layout rather than the file.
+		if rel, relErr := filepath.Rel(s.dir, filepath.Dir(path)); relErr == nil && rel != "." {
+			folder = filepath.ToSlash(rel)
+		}
+	}
+
+	return newDashboard(raw.UID, raw.Title, folder, "dir", s.baseURL)
 }

@@ -17,7 +17,7 @@ Two deliverables, equal weight:
    dropped from the schema.
 
 Problem it solves: schemas accumulate columns nobody queries. Right now the only way to find them is
-to grep 173 dashboard JSON files by hand. The cost of a wrong answer is asymmetric — dropping a
+to grep 172 dashboard JSON files by hand. The cost of a wrong answer is asymmetric — dropping a
 column that *is* used breaks a production dashboard — so the report is built to be conservative and
 to distinguish "provably unused" from "we could not tell".
 
@@ -75,7 +75,8 @@ JOINs, `SELECT *`, `* EXCEPT`, `COLUMNS('regex')`, `FINAL`, `SETTINGS`, `ARRAY J
 comments, `FORMAT`, `UNION ALL` and subqueries natively. This retires the "normalisation is
 mandatory" premise and shrinks Task 5 to brace expansion.
 
-**Grafana corpus** (`/home/ailiev/Projects/otarie/GrafanaRepack/dashboards`, 173 files / 793 panels)
+**Grafana corpus** (`/home/ailiev/Projects/otarie/GrafanaRepack/dashboards`, 172 files → **167 unique
+dashboards** after uid dedup, 793 panels)
 
 | Fact | Value | Consequence |
 |---|---|---|
@@ -414,13 +415,38 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - Create: `models/testdata/dashboards/simple.json`, `models/testdata/dashboards/rows_and_vars.json`
 - Modify: `models/grafana_test.go`
 
-- [ ] define `DashboardSource` interface (`Dashboards() ([]Dashboard, error)`) and `dirSource`
-- [ ] walk the directory for `*.json`, tolerating both bare dashboards and `{"dashboard": …}` exports
-- [ ] validate uid against `^[A-Za-z0-9_-]{1,64}$` in **shared `Dashboard` construction** so both sources get it — a JSON file is untrusted input just as the API is
-- [ ] skip unparseable files with a counted warning rather than failing the whole scan
-- [ ] hand-write the two fixtures (do **not** copy GrafanaRepack files)
-- [ ] write tests for a clean directory, one malformed file, a missing directory, an empty directory, and a rejected uid
-- [ ] run tests — must pass before task 3
+- [x] define `DashboardSource` interface and `dirSource`
+- [x] walk the directory for `*.json`, tolerating both bare dashboards and `{"dashboard": …}` exports
+- [x] validate uid against `^[A-Za-z0-9_-]{1,64}$` in **shared `Dashboard` construction** so both sources get it — a JSON file is untrusted input just as the API is
+- [x] skip unparseable files with a counted warning rather than failing the whole scan
+- [x] hand-write the two fixtures (do **not** copy GrafanaRepack files)
+- [x] write tests for a clean directory, one malformed file, a missing directory, an empty directory, and a rejected uid
+- [x] run tests — must pass before task 3
+
+**Task 2 notes**
+
+- Deviation from the planned signature: the interface is `Dashboards() (DashboardScan, error)`, not
+  `([]Dashboard, error)`. `DashboardScan` carries `Skipped` and `Warnings` alongside the dashboards,
+  which Task 11 needs for scan stats and which a bare slice would throw away. Warnings are capped at
+  50 while the count keeps rising.
+- ➕ **Discovered against the real corpus: 5 pairs of dashboards share a uid** — same uid, same title,
+  provisioned into two folder trees (`mobile/OSN/…` and `mobile/common/…`). Grafana keys dashboards by
+  uid, so these are one dashboard each. `dirSource` now dedupes by uid, first-wins in WalkDir's
+  lexical order, counting and naming each collision. Without this every column those dashboards read
+  would be counted twice and the lineage browser would list the dashboard twice. Test:
+  `TestDirSourceDeduplicatesByUID`.
+- ➕ Corrected the corpus figures: the tree holds **172** JSON files (the 173rd entry is a
+  `.gitkeep`), yielding **167 unique dashboards**. Verified two ways — the scanner reports
+  `dashboards=167 skipped=5`, and an independent Python pass counts 167 distinct uids.
+- Walk is recursive: the real tree nests three levels (`oinis/common/…`), and a non-recursive glob
+  would have found nothing. For directory mode the folder is derived from the relative path when
+  `meta.folderTitle` is absent, which is the provisioned-repo case.
+- A missing or non-directory path is a **hard error**, not an empty scan: reporting zero dashboards
+  for a mistyped path would present as "no dashboard uses anything".
+- Fixtures are hand-written and deliberately exercise Task 4's cases too: a bare dashboard, an
+  API-export envelope, a collapsed row with a nested panel, a `-- Dashboard --` panel reference, an
+  infinity-datasource panel to ignore, a template variable with SQL, and `${period}` inside a table
+  name.
 
 ### Task 3: Grafana HTTP API dashboard source
 
@@ -489,7 +515,7 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - [ ] emit `Confidence: heuristic`; attribute an ambiguous name to **all** candidates (conservative — over-reports `used`)
 - [ ] wire `ResolveQuery` to try AST → fall back to heuristic → never return zero references *and* zero error silently
 - [ ] add the **env-gated corpus test**: when `GRAFANA_DASHBOARDS_DIR` is set, parse every SQL string and report AST-success / heuristic-fallback / failure counts; `t.Skip` when unset
-- [ ] run the corpus test against the real 173-dashboard directory and **record the three counts in this plan** — the probe predicts near-total AST success, so a low number means something is wrong with the integration, not with the parser choice
+- [ ] run the corpus test against the real 172-file corpus (167 unique dashboards) and **record the three counts in this plan** — the probe predicts near-total AST success, so a low number means something is wrong with the integration, not with the parser choice
 - [ ] write tests for deliberately unparseable SQL, ambiguous joined columns, keyword-named columns, a table with no known columns
 - [ ] run tests — must pass before task 8
 
@@ -660,7 +686,7 @@ Driven by `.ai/rules.md` *Documentation update requirements*, which is broader t
 
 **Manual verification**
 - Run against live Grafana (`https://10.233.1.17/dna/`) with a read-only service-account token and
-  compare dashboard/panel counts to the 173/793 measured from the provisioning repo — a large gap means
+  compare dashboard/panel counts to the 167 unique dashboards / 793 panels measured from the provisioning repo — a large gap means
   dashboards exist in only one of the two places.
 - Spot-check five columns reported `unused` by grepping GrafanaRepack directly. Any hit is a bug, not
   a tuning issue.

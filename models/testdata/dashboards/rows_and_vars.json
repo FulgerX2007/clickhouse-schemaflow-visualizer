@@ -1,0 +1,64 @@
+{
+  "meta": {
+    "folderTitle": "Ops",
+    "type": "db-dashboard"
+  },
+  "dashboard": {
+    "uid": "ops_traffic",
+    "title": "Traffic",
+    "schemaVersion": 39,
+    "templating": {
+      "list": [
+        {
+          "name": "period",
+          "type": "query",
+          "query": "SELECT DISTINCT period FROM traffic.periods ORDER BY period",
+          "current": { "value": "6min" },
+          "options": [{ "value": "6min" }, { "value": "1h" }]
+        },
+        {
+          "name": "region",
+          "type": "custom",
+          "query": "eu,us"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 10,
+        "type": "row",
+        "title": "Collapsed section",
+        "collapsed": true,
+        "panels": [
+          {
+            "id": 11,
+            "type": "table",
+            "title": "Bytes by region",
+            "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch" },
+            "targets": [
+              {
+                "refId": "A",
+                "queryType": "table",
+                "rawSql": "SELECT region, sum(bytes) AS total FROM traffic.agg_${period}_distributed WHERE region IN ($region) GROUP BY region"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "type": "stat",
+        "title": "Reuses panel 11",
+        "datasource": { "type": "datasource", "uid": "-- Dashboard --" },
+        "targets": [{ "refId": "A", "panelId": 11 }]
+      },
+      {
+        "id": 13,
+        "type": "table",
+        "title": "External feed",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "inf" },
+        "targets": [{ "refId": "A", "url": "https://example.com/feed.json" }]
+      }
+    ]
+  }
+}
