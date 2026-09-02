@@ -940,10 +940,45 @@ of them are the duplicate-uid pairs, so the real gap is ~15). Worth resolving be
 source alone, since a dashboard that exists only in the repo still reads columns, while one that
 exists only live is invisible to a file-mode scan.
 
-⚠️ The production ClickHouse (`clickhouse:9000` from `.env`) is a cluster-internal name and is not
-reachable from a developer machine, so a **real unused-column report against the production schema has
-still not been produced**. That remains the single most valuable outstanding verification, and it
-needs to run somewhere with access to both.
+### Production run — both halves real
+
+Run against the production ClickHouse (`10.233.1.19:9440`, TLS) **and** the production Grafana
+together, which is the verification everything else was standing in for.
+
+```
+scan:  state=ok mode=api dashboards=147 panels=636 queries=1051 parsed=964 failed=87
+report over 8841 columns:
+  used         3152   35.7%
+  unused        603    6.8%   <- droppable
+  unknown       929   10.5%
+  no-coverage  4157   47.0%
+```
+
+Tables with the most droppable columns: `probe_raw.cnxadaptstream` (245 of 277),
+`probe_raw.ftpsession` (101), `configuration.probe_start` (43), `aggregated.voip_cdr_day` (36).
+
+**Independent spot-check.** All 147 live dashboards were pulled straight from the Grafana API and
+grepped directly, bypassing this code entirely. Of eight columns the report calls unused on
+`cnxadaptstream`, seven appear **nowhere** in 2.4 MB of dashboard JSON. Columns it calls used appear
+constantly: `ProbeTimestamp` 1973 times, `Probe` 680, `Country` 38, `streamId` 9.
+
+The eighth is the interesting one, and it validates the design rather than undermining it. `name2`
+occurs four times — every occurrence inside a query against `probe_raw.voltecallerror_distributed`,
+a *different* table that happens to share the column name. The report agrees:
+
+| table | `name2` verdict | evidence |
+|---|---|---|
+| `probe_raw.voltecallerror` | **used**, 9 refs | `via distributed:probe_raw.voltecallerror_distributed` |
+| `probe_raw.cnxadaptstream` | **unused** | — |
+
+A grep-based analysis would have marked both used and hidden 245 droppable columns behind one
+coincidence of naming. The AST resolver bound the column to the table in that query's `FROM` clause,
+and the Distributed wrapper carried it to the local table. This is the case
+`docs/decisions/0001-sql-parser-dependency.md` was written to justify.
+
+⚠️ Remaining caveat, unchanged: `unused` means unused **by Grafana**. 47% of columns are
+`no-coverage` — no dashboard reads their table at all — and those say nothing about whether an
+application or scheduled job reads them. Cross-check `system.query_log` before dropping anything.
 
 ### Task 13: Inspector — per-column dashboard usage
 
