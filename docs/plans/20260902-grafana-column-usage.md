@@ -735,14 +735,37 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 **Files:**
 - Modify: `models/usage.go`, `models/usage_test.go`
 
-- [ ] `BuildUsageIndex(snap SchemaSnapshot, results []QueryParseResult, prov []UsageRef) UsageIndex` — a pure function over Task 8's types
-- [ ] group references by `db.table`, attach dashboard/panel provenance, dedupe repeated refs
-- [ ] **Distributed propagation**: edge is `{DependsOnTable: distributed, Table: local}` — mark the local table's columns used, `Via: "distributed:<t>"`
-- [ ] **MV propagation, table-level**: if any destination column is used, parse the MV's stored SELECT with the Task 6 AST resolver and mark **every** source column it reads (projection, `WHERE`, `GROUP BY`, `JOIN`) as used, `Via: "mv:<t>"` — do **not** use `extractColumnMappings`, which leaves `SourceTable` empty and resolves at most one column per expression
-- [ ] bound propagation by `maxRelationDepth` (50) with a `seen` map (rule 9); handle the cyclic case
-- [ ] record which local tables had a Distributed wrapper that produced **no** edge (`len(queryParts2) < 6`), for Task 10 to mark `unknown`
-- [ ] write tests: direct usage, distributed→local, MV dest→all source columns, `SELECT a + b AS c` marking both `a` and `b`, MV `WHERE`-only column, a cyclic relation set, depth capping, edgeless Distributed
-- [ ] run tests — must pass before task 10
+- [x] `BuildUsageIndex(snapshot, []ResolvedQuery) UsageIndex` — a pure function over Task 8's types
+- [x] group references by `db.table`, attach dashboard/panel provenance, dedupe repeated refs
+- [x] **Distributed propagation**: edge is `{DependsOnTable: distributed, Table: local}` — mark the local table's columns used, `Via: "distributed:<t>"`
+- [x] **MV propagation, table-level**: if any destination column is used, parse the MV's stored SELECT with the Task 6 AST resolver and mark **every** source column it reads (projection, `WHERE`, `GROUP BY`, `JOIN`) as used, `Via: "mv:<t>"` — do **not** use `extractColumnMappings`, which leaves `SourceTable` empty and resolves at most one column per expression
+- [x] bound propagation by `maxRelationDepth` (50); handle the cyclic case
+- [x] record Distributed wrappers that produced **no** edge (`len(queryParts2) < 6`)
+- [x] write tests: direct usage, distributed→local, MV dest→all source columns, `SELECT a + b AS c` marking both `a` and `b`, MV `WHERE`-only column, a cyclic relation set, depth capping, edgeless Distributed
+- [x] run tests — must pass before task 10
+
+**Task 9 notes**
+
+- `ResolvedQuery` pairs a `QueryParseResult` with the panel it came from, which is how provenance
+  reaches the index without the resolver knowing anything about dashboards.
+- **The two propagation passes are separate functions and both run every round.** Writing them as
+  `a() || b()` looked natural and was wrong: `||` short-circuits, so the view pass would be skipped in
+  any round where the distributed pass had changed something. Propagation loops to a fixed point,
+  bounded by `maxRelationDepth`, so cycles terminate — covered by a test with a timeout.
+- ⚠️ `findUnlinkedDistributed` had to become a free function. `UsageIndex` has a value receiver, and
+  its maps mutate through it fine, but assigning a **slice** field would have been silently discarded.
+- Table-level references dedupe on `dashboard|panel|via`, deliberately **excluding** confidence: at
+  table level the question is only whether a panel reads the table at all, and including confidence
+  listed the same panel once per confidence level.
+- Opacity is recorded per table with a reason (`select-star`, `variable-column`, `unparsed-query`) and
+  **propagates across a Distributed wrapper**, so a `SELECT *` against the wrapper leaves the local
+  table unenumerable too rather than looking cleanly resolved.
+- ➕ `SchemaSnapshot` gained `ViewQueries`, loaded from `create_table_query` in the same
+  `system.tables` query as the keys — no extra round trip. It is what lets MV propagation read the
+  view's actual SELECT.
+- MV propagation is verified to mark **both** `a` and `b` from `SELECT a + b AS c`, and to mark a
+  column read only in the view's `WHERE` clause. That is precisely what the old
+  `extractColumnMappings` path could not do, and why the plan replaced it.
 
 ### Task 10: Four-state verdicts and the unused report
 
