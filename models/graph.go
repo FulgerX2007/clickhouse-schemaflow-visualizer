@@ -123,7 +123,7 @@ func (c *ClickHouseClient) BuildColumnIndex() ([]ColumnIndexEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query system.columns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var idx []ColumnIndexEntry
 	for rows.Next() {

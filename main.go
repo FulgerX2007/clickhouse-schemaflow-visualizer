@@ -46,7 +46,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to ClickHouse: %v", err)
 	}
-	defer clickhouseClient.Close()
+	defer func() { _ = clickhouseClient.Close() }()
 
 	// Load the optional Grafana dashboard source. Unlike ClickHouse, a failure
 	// here is never fatal: the visualizer's core function does not depend on it,

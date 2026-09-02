@@ -144,6 +144,7 @@ Verified state of each command in this repository at the time of writing:
 | `gofmt -l .` | prints `models/clickhouse.go` | Pre-existing, unrelated to your change. Do not reformat that file as a drive-by; if you edit it, format only what you touch or make the reformat its own commit. |
 | `go vet ./...` | exit 0, no output | |
 | `golangci-lint run` | not run here; with no config it would use the default linters | There is **no `.golangci.yml`** in the repository, so results depend on your locally installed version. TODO: decide whether to check in a `.golangci.yml` so lint output is reproducible. |
+| `golangci-lint run` | passes, `0 issues` | Build it with the same Go release as your toolchain, or it panics on the standard library. Its default `max-same-issues: 3` hides a repeated finding — pass `--max-same-issues=0` when adding code that resembles existing code. |
 | `go test ./...` | passes; `api` and `models` covered | Six `*_test.go` files, all from the Grafana column-usage feature. `main` and `config` still have none, so a green run does not mean the whole tree is exercised. |
 | `go build -o clickhouse-schemaflow-visualizer .` | exit 0 | Same command CI runs inside the tag-triggered `test` job (`.github/workflows/release.yml`). |
 

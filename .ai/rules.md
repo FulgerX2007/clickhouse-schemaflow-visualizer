@@ -138,9 +138,20 @@ Run the checks locally yourself (see *Testing standards*).
 
 ## Coding conventions
 
-- Go is formatted with `gofmt` and must pass `go vet ./...` (clean today) and
-  `golangci-lint run`. There is **no `.golangci.yml`** in the repo, so the linter runs
-  with its default set.
+- Go is formatted with `gofmt` and must pass `go vet ./...` and `golangci-lint run`.
+  Both are clean today — the lint gate reports `0 issues`. There is **no `.golangci.yml`**
+  in the repo, so the linter runs with its default set.
+- **`golangci-lint` hides repeated findings by default.** `max-same-issues` is 3, so the
+  fourth occurrence of one message is silently dropped — new code can look clean while
+  repeating an existing mistake. That is exactly what happened to an unchecked
+  `rows.Close` in `models/usage.go`. Run
+  `golangci-lint run --max-same-issues=0 --max-issues-per-linter=0` before trusting a
+  clean result on a branch that adds code resembling code already present.
+- **The linter must be built with the same Go release as the toolchain.** A
+  `golangci-lint` compiled by an older Go panics on a newer standard library
+  (`file requires newer Go version go1.27 (application built with go1.26)`) and cannot
+  lint anything at all. After a Go upgrade, re-run
+  `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`.
 - `models/clickhouse.go` is currently not `gofmt`-clean. Run `gofmt -w` on the region
   you touched, not `gofmt -w .`, so the diff stays reviewable
   (this matches the guidance in `CLAUDE.md`).

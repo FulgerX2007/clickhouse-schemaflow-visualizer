@@ -51,6 +51,9 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ### Changed
 
+- Go 1.26 → **1.27** across `go.mod`, the `golang:1.27-alpine` Docker builder, the CI
+  `setup-go` pin, and the version stated in `README.md`, `PROJECT.md`, `CONTRIBUTING.md`,
+  `ARCHITECTURE.md` and `docs/deployment/`.
 - `models.GrafanaIndex` is the first component in the repository that invalidates a
   cache: mutex-guarded, TTL'd, and rebuildable through `POST /api/grafana/refresh`.
   `.ai/rules.md` rules 1 and 8 and the `CLAUDE.md` caching section are amended to say so.
@@ -71,6 +74,10 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
   build/vet/test/lint command set.
 
 ### Fixed
+
+- `golangci-lint run` now reports `0 issues`; it previously could not run at all against a
+  go1.27 toolchain, and once it could it found five unchecked `Close` calls
+  (`main.go`, `models/clickhouse.go` ×2, `models/graph.go`, `models/usage.go`).
 
 - `README.md`: corrected three inaccurate claims in *How It Works* — node IDs are the plain
   `database.table` string, not CityHash32; graph payloads are plain JSON rendered as SVG in
