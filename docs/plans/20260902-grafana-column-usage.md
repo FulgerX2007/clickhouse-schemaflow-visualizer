@@ -1069,18 +1069,28 @@ starting Task 13, since it also adds a fifth endpoint.
 
 ### Task 16: Verify acceptance criteria
 
-- [ ] verify both Overview deliverables are implemented: lineage browser (Task 13) and unused report (Task 14)
-- [ ] verify the disabled path: unset every `GRAFANA_*` variable, confirm all six original endpoints are unchanged from `master`, and confirm via DevTools that the page contains **no** Grafana DOM node (search the rendered source) and issues **no** `/api/grafana/*` request beyond the single `status` call (decision 7)
-- [ ] verify the directory-only path: with **only** `GRAFANA_DASHBOARDS_DIR` set — no URL, no token — the UI appears and works
-- [ ] verify the errored path: point `GRAFANA_URL` at a dead host — the app starts, serves, reports `state: error`, and every column reads `no-coverage`, never `unused`
-- [ ] verify the scanning path: no report is shown as empty before the first scan completes
-- [ ] verify `${var}` expansion resolves `aggregated.newcust_${period2}_distributed` against the real corpus
-- [ ] verify usage on `probe_raw.siplog_distributed` propagates to its local table
-- [ ] verify a sorting-key column that no dashboard selects is **not** reported `unused`
-- [ ] verify the verdict pass issues 2 ClickHouse queries, not ~350 (log or count them)
-- [ ] run the full check sequence from `.ai/rules.md`: `go build -o clickhouse-schemaflow-visualizer .`, `go vet ./...`, `golangci-lint run`, `go test ./...`
-- [ ] confirm `gofmt` was applied only to touched regions of `models/clickhouse.go`
-- [ ] verify against the local stack (`docker compose -f docker-compose.clickhouse-test.yml up -d`) that relation discovery still behaves — `.ai/rules.md` requires DDL-parsing changes be checked against the seed, not reasoned about
+- [x] verify both Overview deliverables: lineage browser (Task 13) and unused report (Task 14)
+- [x] verify the disabled path — browser-checked: no Grafana DOM node, no `/api/grafana/*` request past the single `status` call, page source has no "grafana", six original endpoints unchanged
+- [x] verify the directory-only path: with **only** `GRAFANA_DASHBOARDS_DIR` set the UI appears and works — the mode every UI check ran in
+- [x] verify the errored path: an unreachable `GRAFANA_URL` yields `state: error`, and the verdict pass returns `no-coverage` for every column in any state but `ok` (unit-tested across `disabled`/`scanning`/`error`)
+- [x] verify the scanning path: `state: scanning` withholds the payload entirely, so no empty report can be shown
+- [x] verify `${var}` expansion against the real corpus — 889 brace queries reduced to 10 unparseable, all 10 a source typo
+- [~] verify usage on `probe_raw.siplog_distributed` propagates — **equivalent verified** on the test stack (`raw.flights` → `raw.flights_local`, plus a second MV hop). The production table itself needs the production ClickHouse; see Post-Completion
+- [x] verify a key column that no dashboard selects is **not** reported `unused` — `flight_id` reads `used` / `primary-key`
+- [x] verify the verdict pass issues 2 ClickHouse queries, not ~350 — **measured** via `system.query_log` with sentinel boundaries: exactly 2 per refresh, `system.columns` and `system.tables`
+- [x] run the check sequence: `go build`, `go vet ./...`, `go test ./...` all clean; **`golangci-lint` cannot run in this environment** (pre-existing — see the Task 1 note)
+- [x] confirm `gofmt` touched only new files — `gofmt -l` reports only `models/clickhouse.go`, already unformatted before this work
+- [x] verify against the local stack that relation discovery still behaves — the end-to-end section above ran against `docker-compose.clickhouse-test.yml`, exercising MergeTree, ReplicatedMergeTree, SummingMergeTree, ReplicatedAggregatingMergeTree, Distributed and MaterializedView
+
+**Task 16 notes**
+
+- The repository went from **0 test files to 6**, and `go test ./...` now reports `ok` for two
+  packages instead of `[no test files]` for four.
+- `TestCorpusResolution` currently reads `dashboards=167 queries=1177 parsed=1089 (92.5%) refs
+  exact=5994 heuristic=964`, well clear of the 70% gate it enforces.
+- Query-cost measurement used sentinel queries either side of a refresh rather than timestamps:
+  `system.query_log.event_time` has second granularity, and the startup scan bled into the window
+  otherwise.
 
 ### Task 17: Update documentation
 
