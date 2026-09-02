@@ -1002,15 +1002,44 @@ page — while the columns table renders exactly as it did before this feature e
 **Files:**
 - Modify: `static/html/index.html`, `static/js/app.js`, `static/css/styles.css`
 
-- [ ] **generalise `switchSection()` (`app.js:312-327`) from its hardcoded two-way `if/else` to N sections**, including the `localStorage.activeSection` restore path
-- [ ] **guard `exportHtml()` (`app.js:480`)**, whose `currentActiveSection === 'data-flow' ? dataflowDiagram : relationshipsDiagram` ternary would otherwise export the *relationships* diagram while the report is on screen
-- [ ] add an "Unused columns" section to the nav, **not appended to the DOM at all** when `state` is `disabled` (decision 7); the section tab, its panel and its `switchSection` entry are all conditional
-- [ ] render a sortable table: database, table, column, type, verdict, reason, dashboards-touching-table count
-- [ ] add database / verdict / min-confidence filters wired to the `/api/grafana/unused` query params
-- [ ] make each row click through to the table's inspector view
-- [ ] add a legend stating plainly that **only `unused` licenses a drop**, and that it means unused *by Grafana*
-- [ ] **manual verification**: with the fixture directory, confirm the report lists exactly the known-unused fixture column, that a sorting-key column is absent with reason shown, that switching to this section and back leaves Export HTML exporting the correct diagram, and that a reload restores the section. Record the result here.
-- [ ] run tests — must pass before task 15
+- [x] **generalise `switchSection()` from its hardcoded two-way `if/else` to N sections**, including the `localStorage.activeSection` restore path
+- [x] **guard `exportHtml()`**, whose two-way ternary would otherwise export the relationships diagram while the report is on screen
+- [x] add an "Unused columns" section to the nav, **not appended to the DOM at all** when `state` is `disabled`
+- [x] render a sortable table: database, table, column, type, verdict, reason, dashboards count
+- [x] add database and verdict filters wired to the `/api/grafana/unused` query params
+- [x] make each row click through to the table's inspector view
+- [x] add a legend stating plainly that **only `unused` licenses a drop**, and that it means unused *by Grafana*
+- [x] **manual verification** — recorded below
+- [x] run tests — must pass before task 15
+
+**Task 14 notes**
+
+- The tab and the whole section are **created in JavaScript**, only when Grafana is configured. Nothing
+  was added to `index.html`, so a disabled feature cannot leave markup behind even in the page source.
+- ⚠️ **A real bug, found by the manual verification rather than by reasoning.** The section-restore
+  path raced the asynchronous status fetch: on reload, `switchSection('unused-columns')` ran before
+  the tab existed, fell back to `data-flow`, **and wrote that fallback to `localStorage`** — silently
+  destroying the saved preference. Two fixes: `switchSection` now persists only a section the caller
+  could actually reach, and `restoreActiveSection()` runs a second time once the status resolves.
+  Verified both ways — the preference now survives a reload with Grafana on, and survives *unused*
+  with Grafana off, so enabling Grafana later restores the user's choice.
+- The totals bar, the legend and the caveats sit above the table. Three of the four verdicts mean "do
+  not touch this", so the legend says so in words rather than relying on colour.
+
+**Manual verification** (live browser, test ClickHouse + fixture dashboards):
+
+| Check | Result |
+|---|---|
+| tabs present | `data-flow`, `relationships`, `unused-columns` |
+| totals | `10 unused · 13 used · 0 unknown · 12 no data` — identical to the API |
+| rows under the default `unused` filter | 10, each with database/table/column/type/verdict/reason/dashboards |
+| sorting | clicking *Column* re-sorts and marks the header `▲` |
+| verdict filter | `no-coverage` → 12 rows, all badged "no data" |
+| row click-through | selects `flights_local` in the inspector |
+| Export HTML **on the report** | refuses: "Export HTML applies to the Data flow and Relationships diagrams." |
+| Export HTML **on a diagram** | exports normally, no warning |
+| reload with the report active | restores the section and re-renders 10 rows |
+| **Grafana disabled** | no `unused-columns` tab, no section element, 0 usage/verdict/unused nodes, page source has no "grafana", and the saved preference is left intact |
 
 ### Task 15: [OPTIONAL — recommended to defer] Dashboard lineage diagram
 

@@ -32,6 +32,9 @@ async function loadGrafanaStatus() {
         const response = await fetch('/api/grafana/status');
         if (!response.ok) return;
         grafanaStatus = await response.json();
+        buildUnusedSection();
+        // The remembered section may only now exist.
+        restoreActiveSection();
     } catch (error) {
         console.warn('Grafana status unavailable:', error);
         grafanaStatus = null;
@@ -61,6 +64,252 @@ async function loadTableUsage(database, table) {
         console.warn('Grafana usage unavailable:', error);
         return null;
     }
+}
+
+// ─── Unused-columns report ───────────────────────────────────────────────
+
+let unusedReport = null;
+let unusedSort = { key: 'table', ascending: true };
+
+// buildUnusedSection creates the nav tab and the section, and is only ever
+// called when Grafana is configured. Nothing here exists in the DOM otherwise.
+function buildUnusedSection() {
+    if (!grafanaVisible() || document.getElementById('unused-columns-section')) return;
+
+    const tabs = document.querySelector('.section-tabs');
+    const container = document.querySelector('.schema-sections');
+    if (!tabs || !container) return;
+
+    const tab = document.createElement('button');
+    tab.className = 'section-tab';
+    tab.dataset.section = 'unused-columns';
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-broom';
+    tab.appendChild(icon);
+    tab.appendChild(document.createTextNode(' Unused columns'));
+    tab.addEventListener('click', () => switchSection('unused-columns'));
+    tabs.appendChild(tab);
+
+    const section = document.createElement('div');
+    section.className = 'schema-container hidden';
+    section.id = 'unused-columns-section';
+    section.innerHTML = `
+        <div class="section-header">
+            <div class="section-header-text">
+                <h3>Unused columns</h3>
+                <p class="section-description">Columns no Grafana dashboard reads, directly or through lineage.</p>
+            </div>
+            <div class="view-controls">
+                <select id="unused-database-filter" title="Filter by database"><option value="">all databases</option></select>
+                <select id="unused-verdict-filter" title="Filter by verdict">
+                    <option value="unused">unused</option>
+                    <option value="unknown">unknown</option>
+                    <option value="no-coverage">no data</option>
+                    <option value="used">used</option>
+                    <option value="">all</option>
+                </select>
+                <button id="unused-refresh-btn" title="Re-scan Grafana">↻</button>
+            </div>
+        </div>
+        <div class="unused-scroll-area">
+            <div id="unused-report" class="unused-report"></div>
+        </div>
+    `;
+    container.appendChild(section);
+
+    section.querySelector('#unused-verdict-filter').addEventListener('change', loadUnusedReport);
+    section.querySelector('#unused-database-filter').addEventListener('change', loadUnusedReport);
+    section.querySelector('#unused-refresh-btn').addEventListener('click', refreshGrafanaScan);
+}
+
+async function refreshGrafanaScan() {
+    const button = document.getElementById('unused-refresh-btn');
+    if (button) button.disabled = true;
+    try {
+        const response = await fetch('/api/grafana/refresh', { method: 'POST' });
+        if (response.ok) grafanaStatus = await response.json();
+    } catch (error) {
+        console.warn('Grafana refresh failed:', error);
+    } finally {
+        if (button) button.disabled = false;
+    }
+    await loadUnusedReport();
+}
+
+async function loadUnusedReport() {
+    const target = document.getElementById('unused-report');
+    if (!target) return;
+
+    const database = document.getElementById('unused-database-filter')?.value || '';
+    const verdict = document.getElementById('unused-verdict-filter')?.value ?? 'unused';
+
+    const params = new URLSearchParams();
+    if (database) params.set('database', database);
+    if (verdict) params.set('verdict', verdict);
+
+    try {
+        const response = await fetch(`/api/grafana/unused?${params.toString()}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (payload.state !== 'ok') {
+            renderUnusedUnavailable(target, payload);
+            return;
+        }
+        unusedReport = payload.report;
+        renderUnusedReport(target, payload.report);
+    } catch (error) {
+        console.error('Error loading the unused-columns report:', error);
+        target.textContent = 'Failed to load the report.';
+    }
+}
+
+function renderUnusedUnavailable(target, payload) {
+    target.innerHTML = '';
+    const note = document.createElement('p');
+    note.className = payload.state === 'scanning' ? 'usage-banner scanning' : 'usage-banner error';
+    note.textContent = payload.state === 'scanning'
+        ? 'Scanning Grafana dashboards — the report is not available yet.'
+        : `Grafana usage is unavailable, so no column can be judged: ${payload.error || payload.reason || payload.state}`;
+    target.appendChild(note);
+}
+
+function renderUnusedReport(target, report) {
+    target.innerHTML = '';
+    populateDatabaseFilter(report);
+
+    target.appendChild(unusedTotals(report.totals));
+    target.appendChild(unusedLegend());
+
+    (report.caveats || []).forEach((caveat) => {
+        const note = document.createElement('p');
+        note.className = 'unused-caveat';
+        note.textContent = caveat;
+        target.appendChild(note);
+    });
+
+    if (!report.rows || !report.rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'unused-empty';
+        empty.textContent = 'No columns match this filter.';
+        target.appendChild(empty);
+        return;
+    }
+
+    target.appendChild(unusedTable(report.rows));
+}
+
+function populateDatabaseFilter(report) {
+    const select = document.getElementById('unused-database-filter');
+    if (!select || select.dataset.filled === 'true') return;
+
+    const databases = [...new Set((report.rows || []).map((row) => row.database))].sort();
+    databases.forEach((database) => {
+        const option = document.createElement('option');
+        option.value = database;
+        option.textContent = database;
+        select.appendChild(option);
+    });
+    if (databases.length) select.dataset.filled = 'true';
+}
+
+function unusedTotals(totals) {
+    const bar = document.createElement('div');
+    bar.className = 'unused-totals';
+    [
+        ['unused', totals.unused, 'safe to drop'],
+        ['used', totals.used, 'read by something'],
+        ['unknown', totals.unknown, 'could not be judged'],
+        ['no-coverage', totals.no_coverage, 'nothing reads the table'],
+    ].forEach(([verdict, count, description]) => {
+        const chip = document.createElement('span');
+        chip.className = `verdict-badge verdict-${verdict}`;
+        chip.textContent = `${count} ${VERDICT_LABELS[verdict] || verdict}`;
+        chip.title = description;
+        bar.appendChild(chip);
+    });
+    return bar;
+}
+
+// unusedLegend states plainly what each verdict licenses. Three of the four
+// states mean "do not touch this", and a reader who misses that drops a live
+// column.
+function unusedLegend() {
+    const legend = document.createElement('p');
+    legend.className = 'unused-legend';
+    legend.textContent = 'Only "unused" means safe to drop — and only as far as Grafana can see. '
+        + '"unknown" means a query could not be read, "no data" means nothing reads the table at all, '
+        + 'and key columns count as used because ClickHouse refuses to drop them.';
+    return legend;
+}
+
+const UNUSED_COLUMNS = [
+    { key: 'database', label: 'Database' },
+    { key: 'table', label: 'Table' },
+    { key: 'column', label: 'Column' },
+    { key: 'type', label: 'Type' },
+    { key: 'verdict', label: 'Verdict' },
+    { key: 'reason', label: 'Reason' },
+    { key: 'dashboards', label: 'Dashboards' },
+];
+
+function unusedTable(rows) {
+    const sorted = [...rows].sort((a, b) => {
+        const left = a[unusedSort.key] ?? '';
+        const right = b[unusedSort.key] ?? '';
+        const order = typeof left === 'number' && typeof right === 'number'
+            ? left - right
+            : String(left).localeCompare(String(right));
+        return unusedSort.ascending ? order : -order;
+    });
+
+    const table = document.createElement('table');
+    table.className = 'unused-table';
+
+    const head = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    UNUSED_COLUMNS.forEach((column) => {
+        const cell = document.createElement('th');
+        cell.textContent = column.label;
+        cell.className = 'sortable';
+        if (unusedSort.key === column.key) cell.classList.add(unusedSort.ascending ? 'asc' : 'desc');
+        cell.addEventListener('click', () => {
+            unusedSort = {
+                key: column.key,
+                ascending: unusedSort.key === column.key ? !unusedSort.ascending : true,
+            };
+            const target = document.getElementById('unused-report');
+            if (target && unusedReport) renderUnusedReport(target, unusedReport);
+        });
+        headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+
+    const body = document.createElement('tbody');
+    sorted.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.className = 'unused-row';
+        tr.title = 'Open this table in the inspector';
+        tr.addEventListener('click', () => selectTableByID(`${row.database}.${row.table}`));
+
+        UNUSED_COLUMNS.forEach((column) => {
+            const cell = document.createElement('td');
+            if (column.key === 'verdict') {
+                const badge = document.createElement('span');
+                badge.className = `verdict-badge verdict-${row.verdict}`;
+                badge.textContent = VERDICT_LABELS[row.verdict] || row.verdict;
+                badge.title = VERDICT_TITLES[row.verdict] || '';
+                cell.appendChild(badge);
+            } else {
+                cell.textContent = row[column.key] === undefined || row[column.key] === '' ? '—' : String(row[column.key]);
+                if (column.key === 'type' || column.key === 'reason') cell.className = 'muted';
+            }
+            tr.appendChild(cell);
+        });
+        body.appendChild(tr);
+    });
+    table.appendChild(body);
+    return table;
 }
 
 const ENGINE_TYPES = {
@@ -162,8 +411,7 @@ document.addEventListener('DOMContentLoaded', () => {
         tab.addEventListener('click', () => switchSection(tab.dataset.section));
     });
 
-    const savedActiveSection = localStorage.getItem('activeSection');
-    if (savedActiveSection === 'relationships') switchSection('relationships');
+    restoreActiveSection();
 
     const databaseHeader = document.getElementById('database-header');
     const sidebar = document.querySelector('.sidebar');
@@ -368,20 +616,49 @@ function renderBreadcrumb({ database, table, engine }) {
 }
 
 // ─── Section switching ───────────────────────────────────────────────────
+// sectionElements maps a section name to its container. The unused-columns
+// entry only exists when Grafana is configured, so an absent key is normal
+// rather than an error.
+function sectionElements() {
+    const sections = {
+        'data-flow': dataFlowSection,
+        'relationships': relationshipsSection,
+    };
+    const unused = document.getElementById('unused-columns-section');
+    if (unused) sections['unused-columns'] = unused;
+    return sections;
+}
+
+// switchSection handles any number of sections. It was a two-way if/else, which
+// would have silently ignored a third section and left the old one on screen.
 function switchSection(sectionName) {
-    sectionTabs.forEach((tab) => {
-        tab.classList.toggle('active', tab.dataset.section === sectionName);
+    const sections = sectionElements();
+    const resolved = sections[sectionName] ? sectionName : 'data-flow';
+
+    // Re-queried rather than cached: the unused-columns tab is added after load.
+    document.querySelectorAll('.section-tab').forEach((tab) => {
+        tab.classList.toggle('active', tab.dataset.section === resolved);
     });
-    if (sectionName === 'data-flow') {
-        dataFlowSection.classList.remove('hidden');
-        relationshipsSection.classList.add('hidden');
-        currentActiveSection = 'data-flow';
-    } else {
-        dataFlowSection.classList.add('hidden');
-        relationshipsSection.classList.remove('hidden');
-        currentActiveSection = 'relationships';
+    Object.entries(sections).forEach(([name, element]) => {
+        element.classList.toggle('hidden', name !== resolved);
+    });
+
+    currentActiveSection = resolved;
+    // Only a section the caller could actually reach is remembered. Persisting
+    // the fallback would erase a saved preference for a section that has not
+    // been created yet — the unused-columns tab is added after an async fetch.
+    if (resolved === sectionName) localStorage.setItem('activeSection', sectionName);
+    if (resolved === 'unused-columns') loadUnusedReport();
+}
+
+// restoreActiveSection re-applies the remembered section. It runs once at load
+// and again once the Grafana status resolves, because the section it names may
+// not exist until then.
+function restoreActiveSection() {
+    const saved = localStorage.getItem('activeSection');
+    if (saved && saved !== currentActiveSection && sectionElements()[saved]) {
+        switchSection(saved);
     }
-    localStorage.setItem('activeSection', sectionName);
 }
 
 // ─── Graph loading + rendering ───────────────────────────────────────────
@@ -706,7 +983,13 @@ function exportHtml() {
         showError('No table selected.');
         return;
     }
-    const sourceDiagram = currentActiveSection === 'data-flow' ? dataflowDiagram : relationshipsDiagram;
+    // Only the diagram sections have anything to export; the report is a table.
+    const diagrams = { 'data-flow': dataflowDiagram, 'relationships': relationshipsDiagram };
+    const sourceDiagram = diagrams[currentActiveSection];
+    if (!sourceDiagram) {
+        showError('Export HTML applies to the Data flow and Relationships diagrams.');
+        return;
+    }
     const svg = sourceDiagram.querySelector('svg');
     if (!svg) {
         showError('Nothing to export yet — wait for the diagram to render.');
