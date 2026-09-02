@@ -161,7 +161,9 @@ There are no Go tests; the release workflow runs `go test ./...` (a no-op today)
 
 Manual verification uses `docker-compose.clickhouse-test.yml`, which boots ZooKeeper (`:2181`) and ClickHouse (`:9000` native, `:8123` HTTP, `default`/`default`) and seeds `scripts/clickhouse_test_engines.sql`. The seed creates `raw` (MergeTree + ReplicatedMergeTree with Distributed wrappers) and `aggregated` (ReplicatedAggregatingMergeTree + SummingMergeTree fed by Materialized Views), which between them exercise every parsing branch above. Re-seed with `docker compose -f docker-compose.clickhouse-test.yml down -v` then `up -d`.
 
-Both compose files read the app's connection settings from `.env` (gitignored); `docker-compose.yml` runs the app with `network_mode: host`, while the test stack runs it on a bridge network alongside the `clickhouse-test-engines` container.
+`docker-compose.yml` reads the app's connection settings from `.env` (gitignored) and runs with `network_mode: host`.
+
+**The test stack does not.** `docker-compose.clickhouse-test.yml` pins `CLICKHOUSE_*` in the service's `environment:` block, which overrides `env_file`, so `up` works whatever `.env` holds — a developer's `.env` normally points at a real ClickHouse, and aiming the test container at production would be both wrong and dangerous. `.env` is still read, marked `required: false`, for the settings the stack does not pin: `GRAFANA_*` and `GIN_MODE`. The app runs on a bridge network alongside `clickhouse-test-engines` and reaches it as host `clickhouse`.
 
 ## Release
 

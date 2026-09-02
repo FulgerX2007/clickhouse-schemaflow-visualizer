@@ -58,6 +58,9 @@ It brings up ZooKeeper on `:2181`, ClickHouse on `:9000` (native) and `:8123` (H
 with credentials `default` / `default` and database `test_engines`, and the visualizer
 on `:8080` (`docker-compose.clickhouse-test.yml`). The visualizer service uses
 `env_file: ".env"`, so a `.env` must exist in the repository root before `up`.
+The **test** stack does not require one: it pins the ClickHouse settings itself and
+marks `.env` optional, so `docker compose -f docker-compose.clickhouse-test.yml up -d`
+works even when `.env` points at a production instance.
 
 The seed `scripts/clickhouse_test_engines.sql` creates database `raw`
 (`airports_local` MergeTree, `flights_local` ReplicatedMergeTree, each with a

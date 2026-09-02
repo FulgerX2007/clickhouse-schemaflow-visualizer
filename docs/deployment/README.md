@@ -22,6 +22,7 @@ listed below; classify them before filling this table in.
 |-------------|---------|--------------|-------|
 | Local dev (source) | Run from a checkout | `http://localhost:8080` (default `SERVER_ADDR=:8080`, [`main.go`](../../main.go) line 83) | `go run main.go` ([`README.md`](../../README.md)) |
 | Local dev (compose) | Build image locally and run it | `http://localhost:8080` | [`docker-compose.yml`](../../docker-compose.yml) — `build: .`, `network_mode: "host"`, `env_file: ".env"` |
+| Local test stack | ZooKeeper + seeded ClickHouse + the app | `http://localhost:8080` | [`docker-compose.clickhouse-test.yml`](../../docker-compose.clickhouse-test.yml) — self-contained: pins `CLICKHOUSE_*` in `environment:`, treats `.env` as optional |
 | Local test stack | ClickHouse + ZooKeeper + visualizer, seeded with demo schema | `http://localhost:8080`, ClickHouse `:9000`/`:8123` | [`docker-compose.clickhouse-test.yml`](../../docker-compose.clickhouse-test.yml) — for validating relationship detection, not for production |
 | Published image | Run a released image without a checkout | `ghcr.io/fulgerx2007/clickhouse-schemaflow-visualizer:latest` ([`README.md`](../../README.md)) | Pushed by [`.github/workflows/docker-publish.yml`](../../.github/workflows/docker-publish.yml) |
 | Distro package | systemd service from `.deb` / `.rpm` / `.apk` | `http://<host>:8080` | Built by [`.goreleaser.yaml`](../../.goreleaser.yaml) `nfpms`; see the known packaging defects below |
