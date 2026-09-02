@@ -557,12 +557,55 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - Create: `models/grafana_sql.go`
 - Create: `models/grafana_sql_test.go`
 
-- [ ] implement `expandVariables(sql string, vars []TemplateVariable) (string, bool)` — the bool is `UnknownVar`
-- [ ] expand `${var}` / `${var:raw}` in **table and column positions** (the probe shows both break the parser)
-- [ ] substitute a literal placeholder for bare `$var`, justified as correctness — it would otherwise resolve as a phantom column identifier
-- [ ] do **not** rewrite `$__timeFilter` / `$__interval*` / `$__conditionalAll` — verified to parse natively; add rules only if Task 7's heuristic path needs them
-- [ ] write tests for var-in-table-name, var-in-column-position, unknown-variable flagging, `$` inside a string literal (`'%$x%'`), and a variable with multiple values
-- [ ] run tests — must pass before task 6
+- [x] implement variable expansion — `normalizeQuery(sql, vars) NormalizedQuery`
+- [x] expand `${var}` / `${var:raw}` in **table and column positions** (the probe shows both break the parser)
+- [x] substitute a literal placeholder for bare `$var`, justified as correctness — it would otherwise resolve as a phantom column identifier
+- [x] do **not** rewrite `$__timeFilter` / `$__interval*` / `$__conditionalAll` — verified to parse natively; add rules only if Task 7's heuristic path needs them
+- [x] write tests for var-in-table-name, var-in-column-position, unknown-variable flagging, `$` inside a string literal (`'%$x%'`), and a variable with multiple values
+- [x] run tests — must pass before task 6
+
+**Task 5 notes**
+
+- **Deviation, and the most consequential one in this task: known values are deliberately NOT
+  substituted.** The checklist said to expand `${var}` "using known variable values". Doing so is
+  unsafe in both positions:
+  - *table position* — `agg_${period}_distributed` with values `[6min, 1h]` would resolve to exactly
+    one table and leave its siblings looking untouched. But the dashboard genuinely reads whichever
+    value the viewer picks, so **all** of them are used.
+  - *projection position* — `SELECT ${metric}` would resolve to one column and quietly make the other
+    candidates droppable.
+
+  Every variable therefore becomes the marker `__gfvar__`, a legal SQL identifier. A table name
+  carrying it is a **pattern**: `agg___gfvar___distributed` matches every real `agg_<x>_distributed`.
+  That is not over-attribution, it is the correct semantics. `TablePatternMatches` anchors both ends
+  and never lets the marker cross the `.` between database and table, so a pattern cannot swallow a
+  same-named table in another database. `TemplateVariable.Values` is still carried and can narrow
+  pattern matches later if precision is ever wanted.
+- `NormalizedQuery` reports `TablePattern` and `OpaqueVar` separately rather than one `UnknownVar`
+  flag. Where an opaque variable landed decides whether it costs anything — one in a `WHERE` clause
+  changes no columns, one in the projection does — and only the AST pass can see the marker's
+  position. Task 6 makes that call; this pass just records that it happened.
+- Grafana's built-ins (`${__from}`, `${__to}`, `${__interval_ms}`, …) become numeric literals and are
+  **not** reported as template variables. An unrecognised `${__x}` becomes the marker.
+- The `$__timeFilter` / `$__interval_ms` / `$__conditionalAll` macro family is left byte-identical, as
+  the parser probe showed it should be.
+
+**Corpus results** — 1177 queries, 889 of which carried a `${var}`:
+
+| After normalization | Count |
+|---|---|
+| table names that became patterns | 431 |
+| queries with an opaque variable elsewhere | 885 |
+| `$__` macros preserved untouched | 750 |
+| **leftover `${` (unparseable)** | **10** |
+| leftover bare `$var` | **0** |
+
+- ⚠️ The 10 leftovers are a **typo in the source dashboards**, not a gap in the expander: four files
+  (`mobile/{OSN,common}/Special Events reporting/{Customer Experience,Mobile Data Usage}.json`)
+  contain `${roaming)` — a missing closing brace — alongside correctly written `${roaming}` on the
+  same line. Those panels render invalid SQL in Grafana too. The expander correctly refuses to match
+  malformed syntax, so those queries fall to the heuristic path, which is the conservative outcome.
+  Worth fixing in the dashboard repo, but out of scope here.
 
 ### Task 6: AST resolver via clickhouse-sql-parser
 
