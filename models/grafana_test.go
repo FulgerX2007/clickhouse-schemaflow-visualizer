@@ -3,6 +3,9 @@ package models
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -539,5 +542,417 @@ func TestDirSourceDeduplicatesByUID(t *testing.T) {
 	}
 	if len(scan.Warnings) != 1 || !strings.Contains(scan.Warnings[0], "duplicate dashboard uid") {
 		t.Errorf("warnings = %v, want one naming the duplicate uid", scan.Warnings)
+	}
+}
+
+// ─── Grafana API source ──────────────────────────────────────────────────────
+
+// grafanaServer stands in for Grafana. search returns the listing; dashboards
+// maps uid to the per-dashboard response body.
+type grafanaServer struct {
+	search     string
+	dashboards map[string]string
+	status     map[string]int // per-path status override
+	delay      time.Duration
+	authSeen   []string
+	requests   []string
+}
+
+func (g *grafanaServer) start(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.delay > 0 {
+			time.Sleep(g.delay)
+		}
+		g.authSeen = append(g.authSeen, r.Header.Get("Authorization"))
+		g.requests = append(g.requests, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+
+		if code, ok := g.status[r.URL.Path]; ok {
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(g.dashboards[r.URL.Path]))
+			return
+		}
+
+		if r.URL.Path == "/api/search" {
+			// Only the first page carries results; the second ends the paging loop.
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(g.search))
+			return
+		}
+
+		uid := strings.TrimPrefix(r.URL.Path, "/api/dashboards/uid/")
+		body, ok := g.dashboards[uid]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Dashboard not found"}`))
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func apiConfig(url, token string) GrafanaConfig {
+	return GrafanaConfig{Mode: GrafanaModeAPI, URL: url, Token: token, Timeout: 5 * time.Second}
+}
+
+func TestAPISourceHappyPath(t *testing.T) {
+	grafana := &grafanaServer{
+		search: `[{"uid":"abc123","title":"Search Title","folderTitle":"Ops"}]`,
+		dashboards: map[string]string{
+			"abc123": `{"meta":{"folderTitle":"Ops"},"dashboard":{"uid":"abc123","title":"Real Title"}}`,
+		},
+	}
+	server := grafana.start(t)
+
+	scan, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if scan.Mode != GrafanaModeAPI {
+		t.Errorf("Mode = %q, want %q", scan.Mode, GrafanaModeAPI)
+	}
+	if len(scan.Dashboards) != 1 {
+		t.Fatalf("got %d dashboards, want 1", len(scan.Dashboards))
+	}
+
+	dashboard := scan.Dashboards[0]
+	if dashboard.Title != "Real Title" {
+		t.Errorf("Title = %q, want the dashboard object's title", dashboard.Title)
+	}
+	if dashboard.Folder != "Ops" {
+		t.Errorf("Folder = %q, want %q", dashboard.Folder, "Ops")
+	}
+	if dashboard.Source != "api" {
+		t.Errorf("Source = %q, want %q", dashboard.Source, "api")
+	}
+	if dashboard.URL != server.URL+"/d/abc123" {
+		t.Errorf("URL = %q, want %q", dashboard.URL, server.URL+"/d/abc123")
+	}
+	for _, auth := range grafana.authSeen {
+		if auth != "Bearer tok" {
+			t.Errorf("Authorization = %q, want a bearer token", auth)
+		}
+	}
+}
+
+func TestAPISourceFallsBackToSearchMetadata(t *testing.T) {
+	grafana := &grafanaServer{
+		search: `[{"uid":"abc123","title":"Search Title","folderTitle":"FromSearch"}]`,
+		// The dashboard object omits its own uid, title and folder.
+		dashboards: map[string]string{"abc123": `{"dashboard":{}}`},
+	}
+	server := grafana.start(t)
+
+	scan, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(scan.Dashboards) != 1 {
+		t.Fatalf("got %d dashboards, want 1", len(scan.Dashboards))
+	}
+	if got := scan.Dashboards[0]; got.UID != "abc123" || got.Title != "Search Title" || got.Folder != "FromSearch" {
+		t.Errorf("got %+v, want the search hit's uid, title and folder", got)
+	}
+}
+
+// A listing failure must fail the scan: "search returned nothing" and "no column
+// is used" are indistinguishable downstream.
+func TestAPISourceSearchFailuresAreFatal(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"message":"Unauthorized"}`, wantErr: "Unauthorized"},
+		{name: "server error", status: http.StatusInternalServerError, body: `{"message":"boom"}`, wantErr: "boom"},
+		{name: "not json", status: http.StatusOK, body: `<html>login</html>`, wantErr: "decode search page 1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			grafana := &grafanaServer{
+				search:     tt.body,
+				status:     map[string]int{},
+				dashboards: map[string]string{"/api/search": tt.body},
+			}
+			if tt.status != http.StatusOK {
+				grafana.status["/api/search"] = tt.status
+			}
+			server := grafana.start(t)
+
+			_, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+			if err == nil {
+				t.Fatalf("expected an error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAPISourceEmptyResultIsNotAnError(t *testing.T) {
+	server := (&grafanaServer{search: `[]`}).start(t)
+
+	scan, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err != nil {
+		t.Fatalf("an instance with no dashboards is not an error: %v", err)
+	}
+	if len(scan.Dashboards) != 0 || scan.Skipped != 0 {
+		t.Errorf("got %d dashboards / %d skipped, want 0 / 0", len(scan.Dashboards), scan.Skipped)
+	}
+}
+
+// One dashboard failing is survivable; the scan keeps the rest and counts it.
+func TestAPISourceSkipsOneBadDashboard(t *testing.T) {
+	grafana := &grafanaServer{
+		search: `[{"uid":"good1","title":"Good"},{"uid":"v2dash","title":"V2"},{"uid":"gone","title":"Gone"}]`,
+		dashboards: map[string]string{
+			"good1":  `{"dashboard":{"uid":"good1","title":"Good"}}`,
+			"v2dash": `{"message":"dashboard api version not supported, use /apis/dashboard.grafana.app/v2beta1/"}`,
+		},
+		status: map[string]int{"/api/dashboards/uid/v2dash": http.StatusBadRequest},
+	}
+	grafana.dashboards["/api/dashboards/uid/v2dash"] = grafana.dashboards["v2dash"]
+	server := grafana.start(t)
+
+	scan, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(scan.Dashboards) != 1 || scan.Dashboards[0].UID != "good1" {
+		t.Fatalf("got %+v, want only good1", scan.Dashboards)
+	}
+	if scan.Skipped != 2 {
+		t.Errorf("Skipped = %d, want 2 (the v2 dashboard and the missing one)", scan.Skipped)
+	}
+
+	joined := strings.Join(scan.Warnings, "\n")
+	// The v2 refusal is named rather than reported as a generic failure.
+	if !strings.Contains(joined, "v2-schema dashboard") {
+		t.Errorf("warnings = %v, want the v2 refusal named", scan.Warnings)
+	}
+	if !strings.Contains(joined, "v2dash") || !strings.Contains(joined, "gone") {
+		t.Errorf("warnings = %v, want both failures to name their uid", scan.Warnings)
+	}
+}
+
+// Every dashboard failing is a systemic problem dressed as an empty Grafana.
+func TestAPISourceAllDashboardsFailingIsAnError(t *testing.T) {
+	grafana := &grafanaServer{
+		search:     `[{"uid":"a1","title":"A"},{"uid":"b2","title":"B"}]`,
+		dashboards: map[string]string{},
+	}
+	server := grafana.start(t)
+
+	_, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err == nil {
+		t.Fatal("expected an error when no dashboard could be loaded, got nil")
+	}
+	if !strings.Contains(err.Error(), "all 2 dashboards failed") {
+		t.Errorf("error = %q, want it to report that every dashboard failed", err)
+	}
+}
+
+func TestAPISourceRejectsInvalidUIDFromSearch(t *testing.T) {
+	grafana := &grafanaServer{
+		search:     `[{"uid":"../../admin","title":"Traversal"}]`,
+		dashboards: map[string]string{},
+	}
+	server := grafana.start(t)
+
+	_, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	// It must be rejected before any request is made for it.
+	for _, path := range grafana.requests {
+		if strings.Contains(path, "admin") {
+			t.Errorf("a request was made for the invalid uid: %s", path)
+		}
+	}
+}
+
+func TestAPISourceTimeout(t *testing.T) {
+	grafana := &grafanaServer{search: `[]`, delay: 150 * time.Millisecond}
+	server := grafana.start(t)
+
+	cfg := apiConfig(server.URL, "tok")
+	cfg.Timeout = 20 * time.Millisecond
+
+	_, err := newAPISource(cfg).Dashboards()
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "/api/search") {
+		t.Errorf("error = %q, want it to name the failing call", err)
+	}
+}
+
+// An error must never carry the credential.
+func TestAPISourceErrorsDoNotLeakTheToken(t *testing.T) {
+	const token = "glsa-supersecret-value"
+
+	grafana := &grafanaServer{
+		search:     `{"message":"Unauthorized"}`,
+		status:     map[string]int{"/api/search": http.StatusUnauthorized},
+		dashboards: map[string]string{"/api/search": `{"message":"Unauthorized"}`},
+	}
+	server := grafana.start(t)
+
+	_, err := newAPISource(apiConfig(server.URL, token)).Dashboards()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("error leaked the token: %v", err)
+	}
+}
+
+func TestAPISourcePagesThroughResults(t *testing.T) {
+	// A full first page forces a second request; the stub answers page 2 empty.
+	hits := make([]string, grafanaSearchPageSize)
+	dashboards := map[string]string{}
+	for i := range hits {
+		uid := fmt.Sprintf("dash%d", i)
+		hits[i] = fmt.Sprintf(`{"uid":%q,"title":"D%d"}`, uid, i)
+		dashboards[uid] = fmt.Sprintf(`{"dashboard":{"uid":%q,"title":"D%d"}}`, uid, i)
+	}
+	grafana := &grafanaServer{search: "[" + strings.Join(hits, ",") + "]", dashboards: dashboards}
+	server := grafana.start(t)
+
+	scan, err := newAPISource(apiConfig(server.URL, "tok")).Dashboards()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(scan.Dashboards) != grafanaSearchPageSize {
+		t.Errorf("got %d dashboards, want %d", len(scan.Dashboards), grafanaSearchPageSize)
+	}
+
+	searches := 0
+	for _, path := range grafana.requests {
+		if path == "/api/search" {
+			searches++
+		}
+	}
+	if searches != 2 {
+		t.Errorf("made %d search requests, want 2 (a full page must be followed by another)", searches)
+	}
+}
+
+// ─── Source selection and fallback ───────────────────────────────────────────
+
+func TestFallbackSourceUsesDirectoryWhenAPIFails(t *testing.T) {
+	// No server: the API call fails outright.
+	cfg := GrafanaConfig{
+		Mode:          GrafanaModeAPI,
+		URL:           "http://127.0.0.1:1",
+		Token:         "tok",
+		DashboardsDir: "testdata/dashboards",
+		Timeout:       200 * time.Millisecond,
+	}
+
+	source, err := NewDashboardSource(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	scan, err := source.Dashboards()
+	if err != nil {
+		t.Fatalf("the directory should have rescued the scan: %v", err)
+	}
+	if len(scan.Dashboards) != 2 {
+		t.Errorf("got %d dashboards, want the 2 fixtures", len(scan.Dashboards))
+	}
+	// The fallback must be visible, not passed off as a normal API scan.
+	if scan.Mode != GrafanaModeAPIFallbackDir {
+		t.Errorf("Mode = %q, want %q", scan.Mode, GrafanaModeAPIFallbackDir)
+	}
+	if len(scan.Warnings) == 0 || !strings.Contains(scan.Warnings[0], "grafana api unavailable") {
+		t.Errorf("warnings = %v, want one explaining the fallback", scan.Warnings)
+	}
+	// A fallback is not a lost dashboard.
+	if scan.Skipped != 0 {
+		t.Errorf("Skipped = %d, want 0", scan.Skipped)
+	}
+}
+
+func TestFallbackSourceReportsBothFailures(t *testing.T) {
+	cfg := GrafanaConfig{
+		Mode:          GrafanaModeAPI,
+		URL:           "http://127.0.0.1:1",
+		Token:         "tok",
+		DashboardsDir: filepath.Join(t.TempDir(), "missing"),
+		Timeout:       200 * time.Millisecond,
+	}
+
+	source, err := NewDashboardSource(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err = source.Dashboards(); err == nil {
+		t.Fatal("expected an error when both sources fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "grafana api failed") || !strings.Contains(err.Error(), "directory failed too") {
+		t.Errorf("error = %q, want it to name both failures", err)
+	}
+}
+
+func TestNewDashboardSourceSelection(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     GrafanaConfig
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "api alone",
+			cfg:  GrafanaConfig{Mode: GrafanaModeAPI, URL: "https://g", Token: "t"},
+			want: "models.apiSource",
+		},
+		{
+			name: "api with a directory becomes a fallback pair",
+			cfg:  GrafanaConfig{Mode: GrafanaModeAPI, URL: "https://g", Token: "t", DashboardsDir: "/dash"},
+			want: "models.fallbackSource",
+		},
+		{
+			name: "directory alone",
+			cfg:  GrafanaConfig{Mode: GrafanaModeDir, DashboardsDir: "/dash"},
+			want: "models.dirSource",
+		},
+		{
+			name:    "disabled has no source",
+			cfg:     GrafanaConfig{Mode: GrafanaModeDisabled},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := NewDashboardSource(tt.cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := fmt.Sprintf("%T", source); got != tt.want {
+				t.Errorf("source type = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

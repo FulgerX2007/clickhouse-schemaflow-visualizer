@@ -454,13 +454,38 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - Modify: `models/grafana.go`
 - Modify: `models/grafana_test.go`
 
-- [ ] implement `apiSource`: paged `GET /api/search?type=dash-db&limit=…`, then `GET /api/dashboards/uid/<uid>`
-- [ ] bearer auth, configurable timeout, `SkipVerify` TLS option
-- [ ] build the deep link `<url>/d/<uid>`, capture `meta.folderTitle`
-- [ ] skip v2-schema dashboards (`dashboard api version not supported`) with a counted, named warning — do not attempt conversion
-- [ ] fall back to `dirSource` on API error when a directory is configured, and set mode `api-fallback-dir` so status reports it (decision 6 — a silent switch would misreport provenance)
-- [ ] write `httptest.Server` tests: happy path, 401, 500, v2 refusal, empty result, timeout, fallback-fired
-- [ ] run tests — must pass before task 4
+- [x] implement `apiSource`: paged `GET /api/search?type=dash-db&limit=…`, then `GET /api/dashboards/uid/<uid>`
+- [x] bearer auth, configurable timeout, `SkipVerify` TLS option
+- [x] build the deep link `<url>/d/<uid>`, capture `meta.folderTitle`
+- [x] skip v2-schema dashboards (`dashboard api version not supported`) with a counted, named warning — do not attempt conversion
+- [x] fall back to `dirSource` on API error when a directory is configured, and set mode `api-fallback-dir` so status reports it (decision 6 — a silent switch would misreport provenance)
+- [x] write `httptest.Server` tests: happy path, 401, 500, v2 refusal, empty result, timeout, fallback-fired
+- [x] run tests — must pass before task 4
+
+**Task 3 notes**
+
+- `DashboardScan` gained a `Mode` field. The *configured* mode lives on `GrafanaConfig`; the
+  *effective* mode is a property of the scan, because a fired fallback changes it. Status reports the
+  scan's mode, so `api-fallback-dir` can never be passed off as a healthy API scan.
+- **Failure policy, deliberately asymmetric.** A failed `/api/search` fails the whole scan — "search
+  returned nothing" and "no column is used" are indistinguishable downstream. A single dashboard that
+  fails to load is skipped and counted. But **if every dashboard fails while the search succeeded, the
+  scan errors**: that is a systemic problem wearing the costume of an empty Grafana, and returning
+  zero dashboards would make every column look droppable.
+- Uid validation happens **before** the fetch request is built, so a hostile search result cannot
+  steer the URL. Test asserts no request is issued for a traversal uid.
+- ➕ Added beyond the checklist: paging test (a full page forces a second request), a token-leak test
+  on the error path, an invalid-uid test, a search-metadata-fallback test (dashboard objects may omit
+  their own uid/title/folder), and a `NewDashboardSource` selection test covering all four modes.
+- ⚠️ **Live API validation was not possible**: the configured instance (`https://10.233.1.17/dna/`)
+  answers `dial tcp 10.233.1.17:443: connect: no route to host` from this machine — presumably it is
+  behind a VPN. The API path is therefore covered by `httptest` only, and **Post-Completion still
+  requires a live run**.
+- ✔ The *fallback* path was validated end-to-end against real configuration: with the real
+  (unreachable) `GRAFANA_URL` plus the real dashboards directory, the scan reports
+  `mode=api-fallback-dir dashboards=167 skipped=5`, carries a warning naming the connection failure,
+  and still builds deep links from the configured Grafana URL — so links work even while the API does
+  not. This is exactly the production scenario for a VPN-gated Grafana.
 
 ### Task 4: Panel, target, and template-variable extraction
 

@@ -1,9 +1,13 @@
 package models
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -259,6 +263,10 @@ type TemplateVariable struct {
 // half its dashboards would look exactly like a Grafana in which half the
 // columns are unused.
 type DashboardScan struct {
+	// Mode names the source that actually produced this scan, which is not always
+	// the configured one: an API failure that falls back to disk reports
+	// api-fallback-dir, so status never misstates provenance.
+	Mode       GrafanaMode
 	Dashboards []Dashboard
 	Skipped    int
 	Warnings   []string
@@ -270,6 +278,12 @@ const maxScanWarnings = 50
 
 func (s DashboardScan) withSkip(format string, args ...any) DashboardScan {
 	s.Skipped++
+	return s.withWarning(format, args...)
+}
+
+// withWarning records a note that did not cost a dashboard, such as a fallback
+// having fired.
+func (s DashboardScan) withWarning(format string, args ...any) DashboardScan {
 	if len(s.Warnings) < maxScanWarnings {
 		s.Warnings = append(s.Warnings, fmt.Sprintf(format, args...))
 	}
@@ -345,7 +359,7 @@ func (s dirSource) Dashboards() (DashboardScan, error) {
 		return DashboardScan{}, fmt.Errorf("grafana dashboards path %q is not a directory", s.dir)
 	}
 
-	scan := DashboardScan{}
+	scan := DashboardScan{Mode: GrafanaModeDir}
 	// Grafana keys dashboards by uid, so a provisioning tree that holds the same
 	// dashboard in two folders still has one dashboard. Keeping both would
 	// double-count every column they read and list the dashboard twice in the UI.
@@ -413,4 +427,254 @@ func (s dirSource) load(path string) (Dashboard, error) {
 	}
 
 	return newDashboard(raw.UID, raw.Title, folder, "dir", s.baseURL)
+}
+
+// ─── Grafana HTTP API source ─────────────────────────────────────────────────
+
+const (
+	// grafanaSearchPageSize is well under Grafana's 5000 cap and keeps each
+	// response small enough to decode without buffering a whole instance.
+	grafanaSearchPageSize = 500
+	// grafanaMaxSearchPages bounds the paging loop against a server that keeps
+	// answering with full pages.
+	grafanaMaxSearchPages = 200
+	// grafanaMaxResponseBytes caps what one response may cost us in memory.
+	grafanaMaxResponseBytes = 32 << 20
+)
+
+// apiSource reads dashboards from the Grafana HTTP API.
+type apiSource struct {
+	baseURL string
+	token   string
+	client  http.Client
+}
+
+func newAPISource(cfg GrafanaConfig) apiSource {
+	transport := http.DefaultTransport
+	if cfg.SkipVerify {
+		// Mirrors CLICKHOUSE_SKIP_VERIFY: opt-in, never the default, for internal
+		// instances behind a private CA.
+		transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in via GRAFANA_SKIP_VERIFY
+		}
+	}
+
+	return apiSource{
+		baseURL: strings.TrimRight(strings.TrimSpace(cfg.URL), "/"),
+		token:   cfg.Token,
+		client:  http.Client{Timeout: cfg.Timeout, Transport: transport},
+	}
+}
+
+// searchHit is one entry of GET /api/search.
+type searchHit struct {
+	UID         string `json:"uid"`
+	Title       string `json:"title"`
+	FolderTitle string `json:"folderTitle"`
+}
+
+// Dashboards lists dashboards and fetches each one.
+//
+// A failure of the listing call is fatal to the scan, because "the search
+// returned nothing" and "every column is unused" are indistinguishable
+// downstream. A single dashboard that fails to load is skipped and counted —
+// unless every one of them fails, which is a systemic problem wearing the
+// costume of an empty Grafana.
+func (s apiSource) Dashboards() (DashboardScan, error) {
+	scan := DashboardScan{Mode: GrafanaModeAPI}
+
+	hits, err := s.search()
+	if err != nil {
+		return scan, err
+	}
+
+	for _, hit := range hits {
+		dashboard, dashErr := s.dashboard(hit)
+		if dashErr != nil {
+			scan = scan.withSkip("dashboard %q: %v", hit.UID, dashErr)
+			continue
+		}
+		scan.Dashboards = append(scan.Dashboards, dashboard)
+	}
+
+	if len(scan.Dashboards) == 0 && scan.Skipped > 0 {
+		return scan, fmt.Errorf("all %d dashboards failed to load, first: %s", scan.Skipped, scan.Warnings[0])
+	}
+
+	return scan, nil
+}
+
+// search pages through the dashboard listing.
+func (s apiSource) search() ([]searchHit, error) {
+	all := []searchHit{}
+
+	for page := 1; page <= grafanaMaxSearchPages; page++ {
+		query := url.Values{}
+		query.Set("type", "dash-db")
+		query.Set("limit", strconv.Itoa(grafanaSearchPageSize))
+		query.Set("page", strconv.Itoa(page))
+
+		body, err := s.get("/api/search?" + query.Encode())
+		if err != nil {
+			return nil, err
+		}
+
+		hits := []searchHit{}
+		if err := json.Unmarshal(body, &hits); err != nil {
+			return nil, fmt.Errorf("decode search page %d: %w", page, err)
+		}
+
+		all = append(all, hits...)
+		if len(hits) < grafanaSearchPageSize {
+			return all, nil
+		}
+	}
+
+	return all, nil
+}
+
+// dashboard fetches one dashboard and reduces it to the envelope.
+func (s apiSource) dashboard(hit searchHit) (Dashboard, error) {
+	if !grafanaUIDPattern.MatchString(hit.UID) {
+		return Dashboard{}, fmt.Errorf("search returned an invalid uid %q", hit.UID)
+	}
+
+	body, err := s.get("/api/dashboards/uid/" + hit.UID)
+	if err != nil {
+		if isV2SchemaRefusal(body) {
+			// Grafana cannot convert these for us, and guessing at the v2 shape
+			// would be worse than declaring the gap.
+			return Dashboard{}, fmt.Errorf("v2-schema dashboard, not readable through the classic API")
+		}
+		return Dashboard{}, err
+	}
+
+	envelope := dashboardEnvelope{}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return Dashboard{}, fmt.Errorf("not valid JSON: %w", err)
+	}
+	if len(envelope.Dashboard) == 0 {
+		return Dashboard{}, fmt.Errorf("response carried no dashboard object")
+	}
+
+	raw := rawDashboard{}
+	if err := json.Unmarshal(envelope.Dashboard, &raw); err != nil {
+		return Dashboard{}, fmt.Errorf("not a dashboard object: %w", err)
+	}
+
+	// The search hit is the fallback for both, since a dashboard object may omit
+	// its own uid or title.
+	uid := raw.UID
+	if uid == "" {
+		uid = hit.UID
+	}
+	title := raw.Title
+	if strings.TrimSpace(title) == "" {
+		title = hit.Title
+	}
+	folder := envelope.Meta.FolderTitle
+	if folder == "" {
+		folder = hit.FolderTitle
+	}
+
+	return newDashboard(uid, title, folder, "api", s.baseURL)
+}
+
+// get performs an authenticated GET. The body is returned even on a non-200 so
+// the caller can classify the refusal; the token never appears in an error.
+func (s apiSource) get(path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, s.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request for %s: %w", path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		// url.Error stringifies the request URL, which carries no credentials.
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, grafanaMaxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return body, fmt.Errorf("GET %s: %s", path, grafanaHTTPError(resp.StatusCode, body))
+	}
+	return body, nil
+}
+
+// grafanaHTTPError renders a status line plus Grafana's own message when it sent
+// one, truncated so a HTML error page cannot flood a log line.
+func grafanaHTTPError(status int, body []byte) string {
+	message := grafanaErrorMessage(body)
+	if message == "" {
+		return http.StatusText(status)
+	}
+	if len(message) > 200 {
+		message = message[:200] + "…"
+	}
+	return fmt.Sprintf("%s: %s", http.StatusText(status), message)
+}
+
+func grafanaErrorMessage(body []byte) string {
+	payload := struct {
+		Message string `json:"message"`
+	}{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Message)
+}
+
+// isV2SchemaRefusal recognises Grafana declining to serve a v2-schema dashboard
+// through the classic API.
+func isV2SchemaRefusal(body []byte) bool {
+	return strings.Contains(strings.ToLower(grafanaErrorMessage(body)), "dashboard api version not supported")
+}
+
+// ─── Source selection ────────────────────────────────────────────────────────
+
+// fallbackSource tries the API and drops to the directory when it fails, so a
+// Grafana outage degrades to the provisioned copy on disk instead of reporting
+// that nothing is used.
+type fallbackSource struct {
+	primary  DashboardSource
+	fallback DashboardSource
+}
+
+func (s fallbackSource) Dashboards() (DashboardScan, error) {
+	scan, err := s.primary.Dashboards()
+	if err == nil {
+		return scan, nil
+	}
+
+	fallbackScan, fallbackErr := s.fallback.Dashboards()
+	if fallbackErr != nil {
+		return DashboardScan{}, fmt.Errorf("grafana api failed (%v) and the dashboards directory failed too: %w", err, fallbackErr)
+	}
+
+	// Say so rather than passing the result off as a normal API scan.
+	fallbackScan.Mode = GrafanaModeAPIFallbackDir
+	return fallbackScan.withWarning("grafana api unavailable, read dashboards from disk instead: %v", err), nil
+}
+
+// NewDashboardSource builds the source the configuration calls for.
+func NewDashboardSource(cfg GrafanaConfig) (DashboardSource, error) {
+	switch cfg.Mode {
+	case GrafanaModeAPI:
+		api := newAPISource(cfg)
+		if cfg.DashboardsDir != "" {
+			return fallbackSource{primary: api, fallback: newDirSource(cfg.DashboardsDir, cfg.URL)}, nil
+		}
+		return api, nil
+	case GrafanaModeDir:
+		return newDirSource(cfg.DashboardsDir, cfg.URL), nil
+	default:
+		return nil, fmt.Errorf("no grafana dashboard source is configured")
+	}
 }
