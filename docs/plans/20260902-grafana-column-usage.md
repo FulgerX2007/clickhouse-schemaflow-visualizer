@@ -612,15 +612,53 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 **Files:**
 - Modify: `models/grafana_sql.go`, `models/grafana_sql_test.go`, `go.mod`, `go.sum`
 
-- [ ] add `github.com/AfterShip/clickhouse-sql-parser` **pinned at v0.5.6**, run `go mod tidy` (justification per `.ai/rules.md` dependency rule: the probe in Context; ADR in Task 17)
-- [ ] parse with `parser.NewParser(...).ParseStmts()`; walk with `parser.Walk` / `parser.FindAll` — **do not** implement the 100-method `ASTVisitor`
-- [ ] build an alias→qualified-table map covering CTEs, subqueries and JOINs; qualify unqualified tables with `GRAFANA_DEFAULT_DATABASE`
-- [ ] **an unqualified column in a multi-table query is attributed to every candidate table whose schema has that name, at `heuristic` confidence** — the AST cannot disambiguate it, and calling it `exact` would falsely mark the other table's column `unused`
-- [ ] set `SelectStar` for `SELECT *`, `SELECT t.*`, `SELECT * EXCEPT (…)` and `COLUMNS('regex')`
-- [ ] populate `Tables` even when column resolution fails, and truncate snippets to `GRAFANA_SNIPPET_CHARS`
-- [ ] write tests: single-table, aliased JOIN, CTE, nested subquery, all four star variants, unqualified-table, unqualified-column-in-JOIN downgrade
-- [ ] write tests asserting a parse failure yields a populated `ParseError` and no panic
-- [ ] run tests — must pass before task 7
+- [x] add `github.com/AfterShip/clickhouse-sql-parser` **pinned at v0.5.6**, run `go mod tidy` (justification per `.ai/rules.md` dependency rule: the probe in Context; ADR in Task 17)
+- [x] parse with `parser.NewParser(...).ParseStmts()`; walk with `parser.Walk` — **do not** implement the 100-method `ASTVisitor`
+- [x] build an alias→qualified-table map covering CTEs, subqueries and JOINs; qualify unqualified tables with `GRAFANA_DEFAULT_DATABASE`
+- [x] **an unqualified column in a multi-table query is attributed to every candidate table whose schema has that name, at `heuristic` confidence** — the AST cannot disambiguate it, and calling it `exact` would falsely mark the other table's column `unused`
+- [x] set `SelectStar` for `SELECT *`, `SELECT t.*`, `SELECT * EXCEPT (…)` and `COLUMNS('regex')`
+- [x] populate `Tables` even when column resolution fails, and truncate snippets to `GRAFANA_SNIPPET_CHARS`
+- [x] write tests: single-table, aliased JOIN, CTE, nested subquery, all four star variants, unqualified-table, unqualified-column-in-JOIN downgrade
+- [x] write tests asserting a parse failure yields a populated `ParseError` and no panic
+- [x] run tests — must pass before task 7
+
+**Task 6 notes**
+
+- ⚠️ **`parser.Walk` aborts the entire traversal when the callback returns `false`, not just that
+  subtree** — the doc comment says "stops for the current subtree", but each parent propagates a
+  child's `false` upward. Returning `false` after handling a `Path` node truncated resolution to the
+  first column of the query. Identifiers already accounted for are now suppressed by marking them in
+  an exclusion set instead; `Walk` is pre-order, so a node's children are excluded before they are
+  visited. Anything else in this repo that walks this AST must not return `false`.
+- `CTEStmt`'s field names are inverted relative to their meaning: `Expr` holds the CTE's **name** and
+  `Alias` holds its **body**. Confirmed by dumping the AST.
+- A single-table query attributes its unqualified columns at `exact` confidence — there is nowhere
+  else they could come from. Only multi-table queries downgrade to `heuristic`.
+- A column reached through a CTE alias is attributed to nothing: the CTE is not a table, and inventing
+  a table for it would corrupt the index. The real tables inside the CTE body are still read.
+- `COLUMNS('…')` is detected on the `FunctionExpr` node, because the function's name identifier is
+  already excluded by the time the identifier pass runs.
+- ➕ **`INTERVAL <marker>` repair, added after measuring.** A variable in an interval operand
+  (`INTERVAL ${period}`) leaves a bare identifier where ClickHouse demands `INTERVAL <number> <unit>`,
+  which fails the *whole query* rather than one name. The operand names no column, so it is rewritten
+  to a well-formed literal; plural units are singularised because the parser accepts only the singular
+  spelling. **This alone took the corpus from 86.5% to 92.5% parsed.**
+
+**Corpus results** — 1177 queries:
+
+| Measure | Value |
+|---|---|
+| **parsed by the AST** | **1089 (92.5%)** |
+| parse failures (→ Task 7 fallback) | 88 |
+| column references | 6958 — **5994 exact (86%)**, 964 heuristic |
+| concrete tables referenced | 69 |
+| pattern tables (from `${var}` names) | 26 |
+| `SELECT *` / `COLUMNS()` queries | 17 |
+| queries with an opaque column | 656 |
+
+- The **70% decision gate in Task 16 is met with room to spare**, so the parser dependency stays.
+- Remaining failure signatures: 69 `<ident>`, 10 `<int>`, 4 `{` (the `${roaming)` source typo), 4
+  bracket mismatches. These are the long tail Task 7's fallback exists for.
 
 ### Task 7: Heuristic fallback resolver and corpus measurement
 

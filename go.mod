@@ -3,9 +3,9 @@ module github.com/fulgerX2007/clickhouse-schemaflow-visualizer
 go 1.26.3
 
 require (
+	github.com/AfterShip/clickhouse-sql-parser v0.5.6
 	github.com/ClickHouse/clickhouse-go/v2 v2.34.0
 	github.com/gin-gonic/gin v1.10.0
-	github.com/go-faster/city v1.0.1
 	github.com/joho/godotenv v1.5.1
 )
 
@@ -17,6 +17,7 @@ require (
 	github.com/cloudwego/base64x v0.1.5 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.9 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
+	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect

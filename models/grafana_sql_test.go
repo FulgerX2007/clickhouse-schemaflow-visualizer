@@ -1,6 +1,7 @@
 package models
 
 import (
+	"sort"
 	"strings"
 	"testing"
 )
@@ -261,5 +262,328 @@ func TestTablePatternDoesNotOverMatch(t *testing.T) {
 
 	if !TablePatternMatches(pattern, "aggregated.newcust_6min_distributed") {
 		t.Error("pattern failed to match the table it was derived from")
+	}
+}
+
+// ─── AST resolution ──────────────────────────────────────────────────────────
+
+// resolve normalises and parses in one step, the way the pipeline will.
+func resolve(t *testing.T, sql string, variables []TemplateVariable) QueryParseResult {
+	t.Helper()
+
+	normalized := normalizeQuery(sql, variables)
+	return resolveQueryAST(normalized, "defaultdb", truncateSnippet(sql, 200))
+}
+
+// refKey renders a reference for compact comparison.
+func refKey(r QueryReference) string {
+	return r.Database + "." + r.Table + ":" + r.Column + "(" + string(r.Confidence) + ")"
+}
+
+func refKeys(result QueryParseResult) []string {
+	keys := make([]string, 0, len(result.References))
+	for _, reference := range result.References {
+		keys = append(keys, refKey(reference))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func TestResolveSingleTable(t *testing.T) {
+	got := resolve(t, "SELECT a, b FROM shop.orders WHERE c > 1 GROUP BY d", nil)
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	want := []string{
+		"shop.orders:a(exact)",
+		"shop.orders:b(exact)",
+		"shop.orders:c(exact)",
+		"shop.orders:d(exact)",
+	}
+	if diff := strings.Join(refKeys(got), " "); diff != strings.Join(want, " ") {
+		t.Errorf("references = %v\nwant       = %v", refKeys(got), want)
+	}
+	if len(got.Tables) != 1 || got.Tables[0] != "shop.orders" {
+		t.Errorf("Tables = %v, want [shop.orders]", got.Tables)
+	}
+}
+
+// A column that could come from either side of a join is attributed to both,
+// at heuristic confidence. Over-reporting usage keeps a column alive;
+// under-reporting would mark a live column droppable.
+func TestResolveJoinQualifiedAndUnqualified(t *testing.T) {
+	got := resolve(t, `
+		SELECT a.name, b.total, shared
+		FROM shop.customers AS a
+		JOIN shop.orders AS b ON a.id = b.customer_id`, nil)
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+
+	keys := strings.Join(refKeys(got), " ")
+	for _, want := range []string{
+		"shop.customers:name(exact)",
+		"shop.orders:total(exact)",
+		"shop.customers:id(exact)",
+		"shop.orders:customer_id(exact)",
+		// Unqualified: nobody can say which side owns it.
+		"shop.customers:shared(heuristic)",
+		"shop.orders:shared(heuristic)",
+	} {
+		if !strings.Contains(keys, want) {
+			t.Errorf("missing %s in %v", want, refKeys(got))
+		}
+	}
+}
+
+// In a single-table query an unqualified column is unambiguous.
+func TestResolveUnqualifiedColumnInSingleTableQueryIsExact(t *testing.T) {
+	got := resolve(t, "SELECT plain FROM shop.orders", nil)
+
+	if len(got.References) != 1 {
+		t.Fatalf("references = %v, want one", refKeys(got))
+	}
+	if got.References[0].Confidence != ConfidenceExact {
+		t.Errorf("Confidence = %q, want exact", got.References[0].Confidence)
+	}
+}
+
+func TestResolveUnqualifiedTableTakesDefaultDatabase(t *testing.T) {
+	got := resolve(t, "SELECT a FROM orders", nil)
+
+	if len(got.Tables) != 1 || got.Tables[0] != "defaultdb.orders" {
+		t.Fatalf("Tables = %v, want [defaultdb.orders]", got.Tables)
+	}
+	if got.References[0].Database != "defaultdb" {
+		t.Errorf("Database = %q, want defaultdb", got.References[0].Database)
+	}
+}
+
+// A CTE is not a table, and a column read through it must not be attributed to
+// a table that does not exist.
+func TestResolveCTE(t *testing.T) {
+	got := resolve(t, `
+		WITH call_time AS (
+			SELECT callID, minIf(timestamp, responseCode = 0) AS inviteTime
+			FROM probe.siplog
+			WHERE method = 'INVITE'
+		)
+		SELECT call_time.inviteTime FROM call_time`, nil)
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	if len(got.Tables) != 1 || got.Tables[0] != "probe.siplog" {
+		t.Errorf("Tables = %v, want only the real table", got.Tables)
+	}
+
+	keys := strings.Join(refKeys(got), " ")
+	for _, want := range []string{"probe.siplog:callID", "probe.siplog:timestamp", "probe.siplog:responseCode", "probe.siplog:method"} {
+		if !strings.Contains(keys, want) {
+			t.Errorf("missing %s in %v", want, refKeys(got))
+		}
+	}
+	// The CTE's own output name is not a column of any real table.
+	if strings.Contains(keys, "inviteTime") {
+		t.Errorf("CTE output attributed to a table: %v", refKeys(got))
+	}
+}
+
+func TestResolveNestedSubquery(t *testing.T) {
+	got := resolve(t, "SELECT outer_col FROM (SELECT inner_col AS outer_col FROM shop.orders) s", nil)
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	keys := strings.Join(refKeys(got), " ")
+	if !strings.Contains(keys, "shop.orders:inner_col") {
+		t.Errorf("missing the inner column: %v", refKeys(got))
+	}
+}
+
+// Every projection this analysis cannot enumerate must be flagged, so the
+// verdict pass can downgrade the whole table rather than call its columns unused.
+func TestResolveStarVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{name: "bare star", sql: "SELECT * FROM shop.orders"},
+		{name: "qualified star", sql: "SELECT o.* FROM shop.orders AS o"},
+		{name: "star except", sql: "SELECT * EXCEPT (secret) FROM shop.orders"},
+		{name: "columns regex", sql: "SELECT COLUMNS('^m') FROM shop.orders"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolve(t, tt.sql, nil)
+			if got.ParseError != "" {
+				t.Fatalf("ParseError = %q", got.ParseError)
+			}
+			if !got.SelectStar {
+				t.Errorf("SelectStar = false for %q", tt.sql)
+			}
+		})
+	}
+}
+
+// A template variable standing where a column belongs has the same consequence
+// as a star: the set of columns read is not knowable.
+func TestResolveOpaqueColumn(t *testing.T) {
+	got := resolve(t, "SELECT ${metric} FROM shop.orders", []TemplateVariable{{Name: "metric"}})
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	if !got.OpaqueColumn {
+		t.Error("OpaqueColumn = false, want true")
+	}
+	for _, reference := range got.References {
+		if reference.Column == varMarker {
+			t.Errorf("the marker leaked into a reference: %v", refKeys(got))
+		}
+	}
+}
+
+// A variable inside a table name survives as a pattern that the schema pass can
+// match, rather than as a table that does not exist.
+func TestResolveTablePatternSurvives(t *testing.T) {
+	got := resolve(t, "SELECT region FROM traffic.agg_${period}_distributed", []TemplateVariable{{Name: "period"}})
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	if len(got.Tables) != 1 {
+		t.Fatalf("Tables = %v, want one", got.Tables)
+	}
+	if !IsTablePattern(got.Tables[0]) {
+		t.Errorf("Tables = %v, want a pattern", got.Tables)
+	}
+	if !TablePatternMatches(got.Tables[0], "traffic.agg_6min_distributed") {
+		t.Errorf("pattern %q does not match the real table", got.Tables[0])
+	}
+}
+
+// Function names, aliases and table names must never be mistaken for columns.
+func TestResolveDoesNotTreatNamesAsColumns(t *testing.T) {
+	got := resolve(t, "SELECT sum(amount) AS revenue FROM shop.orders AS o", nil)
+
+	keys := strings.Join(refKeys(got), " ")
+	if !strings.Contains(keys, "shop.orders:amount") {
+		t.Errorf("missing the real column: %v", refKeys(got))
+	}
+	// Match the column half of the key, so a table's own name does not trip it.
+	for _, bad := range []string{":sum(", ":revenue(", ":orders(", ":shop(", ":o("} {
+		if strings.Contains(keys, bad) {
+			t.Errorf("%q was treated as a column: %v", bad, refKeys(got))
+		}
+	}
+}
+
+// A parse failure must be reported, not swallowed, and must not panic.
+func TestResolveParseFailure(t *testing.T) {
+	got := resolve(t, "SELECT FROM WHERE ((", nil)
+
+	if got.ParseError == "" {
+		t.Error("ParseError is empty for unparseable SQL")
+	}
+	if len(got.References) != 0 || len(got.Tables) != 0 {
+		t.Errorf("a failed parse produced results: %v / %v", refKeys(got), got.Tables)
+	}
+}
+
+func TestResolveNoPanicOnOddInput(t *testing.T) {
+	inputs := []string{"", "   ", ";", "SELECT", "WITH", "/* just a comment */", "SELECT 1", "SELECT 1 FROM"}
+
+	for _, sql := range inputs {
+		t.Run(sql, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("panic on %q: %v", sql, r)
+				}
+			}()
+			resolve(t, sql, nil)
+		})
+	}
+}
+
+func TestTruncateSnippet(t *testing.T) {
+	tests := []struct {
+		name  string
+		sql   string
+		limit int
+		want  string
+	}{
+		{name: "zero disables snippets", sql: "SELECT a FROM t", limit: 0, want: ""},
+		{name: "negative disables snippets", sql: "SELECT a FROM t", limit: -1, want: ""},
+		{name: "whitespace is collapsed", sql: "SELECT a\n  FROM   t", limit: 100, want: "SELECT a FROM t"},
+		{name: "long input is cut", sql: strings.Repeat("x", 50), limit: 10, want: strings.Repeat("x", 10) + "…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateSnippet(tt.sql, tt.limit); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveCarriesSnippet(t *testing.T) {
+	got := resolve(t, "SELECT a FROM shop.orders", nil)
+
+	if len(got.References) == 0 {
+		t.Fatal("no references")
+	}
+	if got.References[0].Snippet != "SELECT a FROM shop.orders" {
+		t.Errorf("Snippet = %q", got.References[0].Snippet)
+	}
+}
+
+// A variable holding an interval leaves a bare identifier where ClickHouse
+// demands INTERVAL <number> <unit>, which fails the whole query rather than one
+// name. The concrete duration is irrelevant: an interval operand names no column.
+func TestNormalizeQueryRepairsIntervalOperands(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{
+			name: "variable carries the count and the unit",
+			sql:  "SELECT toStartOfInterval(ts, INTERVAL ${period}) FROM db.t",
+			want: "SELECT toStartOfInterval(ts, INTERVAL 60 SECOND) FROM db.t",
+		},
+		{
+			name: "variable carries only the count",
+			sql:  "SELECT toStartOfInterval(ts, INTERVAL ${n} MINUTE) FROM db.t",
+			want: "SELECT toStartOfInterval(ts, INTERVAL 60 MINUTE) FROM db.t",
+		},
+		{
+			// The parser accepts only the singular spelling.
+			name: "plural unit is singularised",
+			sql:  "SELECT ts - INTERVAL ${n} days FROM db.t",
+			want: "SELECT ts - INTERVAL 60 day FROM db.t",
+		},
+		{
+			name: "an interval with no variable is untouched",
+			sql:  "SELECT ts - INTERVAL 7 DAY FROM db.t",
+			want: "SELECT ts - INTERVAL 7 DAY FROM db.t",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeQuery(tt.sql, vars("period", "n"))
+			if got.SQL != tt.want {
+				t.Errorf("SQL  = %q\nwant = %q", got.SQL, tt.want)
+			}
+			// It must now actually parse.
+			if result := resolveQueryAST(got, "db", ""); result.ParseError != "" {
+				t.Errorf("still unparseable: %s", result.ParseError)
+			}
+		})
 	}
 }
