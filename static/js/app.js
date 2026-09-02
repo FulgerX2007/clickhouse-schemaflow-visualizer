@@ -238,7 +238,9 @@ function unusedLegend() {
     legend.className = 'unused-legend';
     legend.textContent = 'Only "unused" means safe to drop — and only as far as Grafana can see. '
         + '"unknown" means a query could not be read, "no data" means nothing reads the table at all, '
-        + 'and key columns count as used because ClickHouse refuses to drop them.';
+        + 'and key columns count as used because ClickHouse refuses to drop them. '
+        + 'The dashboard count is per table, not per column: an unused column normally sits in a '
+        + 'table several dashboards read, which is exactly why its absence from every query is meaningful.';
     return legend;
 }
 
@@ -249,7 +251,16 @@ const UNUSED_COLUMNS = [
     { key: 'type', label: 'Type' },
     { key: 'verdict', label: 'Verdict' },
     { key: 'reason', label: 'Reason' },
-    { key: 'dashboards', label: 'Dashboards' },
+    // Counts dashboards reading the TABLE, not this column. Labelled "Dashboards"
+    // it read as a contradiction — "unused" beside "4" looks like the verdict is
+    // backwards — so the header says whose count it is.
+    {
+        key: 'dashboards',
+        label: 'Dashboards on table',
+        title: 'How many dashboards read this table at all — not this column.\n'
+             + 'A column is only ever called unused when its table IS read; if nothing '
+             + 'read the table the verdict would be "no data" instead.',
+    },
 ];
 
 function unusedTable(rows) {
@@ -271,6 +282,7 @@ function unusedTable(rows) {
         const cell = document.createElement('th');
         cell.textContent = column.label;
         cell.className = 'sortable';
+        if (column.title) cell.title = column.title;
         if (unusedSort.key === column.key) cell.classList.add(unusedSort.ascending ? 'asc' : 'desc');
         cell.addEventListener('click', () => {
             unusedSort = {
@@ -303,6 +315,10 @@ function unusedTable(rows) {
             } else {
                 cell.textContent = row[column.key] === undefined || row[column.key] === '' ? '—' : String(row[column.key]);
                 if (column.key === 'type' || column.key === 'reason') cell.className = 'muted';
+                if (column.title) {
+                    cell.className = 'muted';
+                    cell.title = column.title;
+                }
             }
             tr.appendChild(cell);
         });
