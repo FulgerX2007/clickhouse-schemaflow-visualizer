@@ -801,3 +801,63 @@ func TestBuildUnusedReportCaveats(t *testing.T) {
 		t.Errorf("Totals.Unused = %d, want 0 without a completed scan", stale.Totals.Unused)
 	}
 }
+
+// Engines that hold no data of their own are never judged: a Distributed table
+// routes reads, a Merge table fans them out, a materialized view is a trigger.
+// A column of one is not the thing you drop.
+func TestVirtualEnginesAreNeverJudged(t *testing.T) {
+	engines := map[string]string{
+		"db.dist":  "Distributed",
+		"db.merge": "Merge",
+		"db.mv":    "MaterializedView",
+		"db.view":  "View",
+		"db.real":  "MergeTree",
+	}
+	columns := map[string][]ColumnInfo{}
+	for name := range engines {
+		columns[name] = []ColumnInfo{{Name: "x"}, {Name: "y"}}
+	}
+	snapshot := SchemaSnapshot{
+		Columns: columns, Engines: engines,
+		Keys: map[string]TableKeys{}, ViewQueries: map[string]string{},
+	}
+
+	// Something reads every table, so "unused" would otherwise be reachable.
+	queries := []ResolvedQuery{}
+	for name := range engines {
+		queries = append(queries, ResolvedQuery{
+			Source: panelRef("d", 1),
+			Result: ResolveQuery("SELECT x FROM "+name, nil, "db", 200, snapshot.Lookup()),
+		})
+	}
+	index := BuildUsageIndex(snapshot, queries)
+
+	for table, engine := range engines {
+		usage := BuildTableUsage(snapshot, index, GrafanaStateOK, table)
+		verdict, reason := verdictOf(usage, "y")
+
+		if engine == "MergeTree" {
+			if verdict != VerdictUnused {
+				t.Errorf("%s (%s): verdict = %q, want unused — a real table must still be judged", table, engine, verdict)
+			}
+			continue
+		}
+		if verdict != VerdictUnknown {
+			t.Errorf("%s (%s): verdict = %q, want unknown", table, engine, verdict)
+		}
+		if reason == "" {
+			t.Errorf("%s (%s): no reason given", table, engine)
+		}
+		if usage.UnusedCount != 0 {
+			t.Errorf("%s (%s): UnusedCount = %d, want 0", table, engine, usage.UnusedCount)
+		}
+	}
+
+	// And none of them reaches the report.
+	report := BuildUnusedReport(snapshot, index, GrafanaStateOK, UnusedReportFilters{})
+	for _, row := range report.Rows {
+		if engine := engines[row.Database+"."+row.Table]; engine != "MergeTree" {
+			t.Errorf("a %s table reached the report: %s.%s", engine, row.Database, row.Table)
+		}
+	}
+}

@@ -618,10 +618,30 @@ const (
 const (
 	ReasonNoDashboard        = "no-dashboard-reads-this-table"
 	ReasonGrafanaUnavailable = "grafana-usage-not-available"
-	ReasonDistributed        = "distributed-wrapper-judge-the-local-table"
 	ReasonUnlinkedWrapper    = "distributed-wrapper-has-no-resolvable-local-table"
 	ReasonViaLineage         = "read-through-lineage"
 )
+
+// virtualEngines hold no data of their own. A Distributed table routes reads to
+// shards, a Merge table fans a read across sibling tables, and a materialized
+// view is a trigger over its source — none of them store a column you could
+// drop. ALTER TABLE … DROP COLUMN on one either fails or edits a routing
+// definition, so the question always belongs to the tables underneath.
+var virtualEngines = map[string]string{
+	"Distributed":      ReasonDistributed,
+	"Merge":            "merge-table-judge-the-underlying-tables",
+	"MaterializedView": "materialized-view-judge-its-source-and-destination",
+	"View":             "view-judge-the-tables-it-reads",
+}
+
+// ReasonDistributed is kept as a named constant because tests and callers refer
+// to the most common of these by name.
+const ReasonDistributed = "distributed-wrapper-judge-the-local-table"
+
+// virtualEngineReason names why a table cannot be judged, or "" if it can.
+func virtualEngineReason(engine string) string {
+	return virtualEngines[engine]
+}
 
 // ColumnUsage is one column's verdict and the evidence behind it.
 type ColumnUsage struct {
@@ -663,7 +683,7 @@ func BuildTableUsage(snapshot SchemaSnapshot, index UsageIndex, state GrafanaSta
 	}
 
 	keys := snapshot.Keys[table]
-	distributed := ClassifyEngine(snapshot.Engines[table]) == EngineDistributed
+	virtualReason := virtualEngineReason(snapshot.Engines[table])
 	unlinked := false
 	for _, wrapper := range index.UnlinkedDistributed() {
 		if wrapper == table {
@@ -693,7 +713,7 @@ func BuildTableUsage(snapshot SchemaSnapshot, index UsageIndex, state GrafanaSta
 			opaqueReason:  opaqueReason,
 			isKey:         keys.Contains(column.Name),
 			keyRole:       keys.Role(column.Name),
-			isDistributed: distributed,
+			virtualReason: virtualReason,
 			unlinked:      unlinked,
 		})
 
@@ -721,7 +741,7 @@ type verdictInputs struct {
 	opaqueReason  string
 	isKey         bool
 	keyRole       string
-	isDistributed bool
+	virtualReason string
 	unlinked      bool
 }
 
@@ -751,10 +771,10 @@ func columnVerdict(in verdictInputs) (ColumnVerdict, string) {
 	if in.unlinked {
 		return VerdictUnknown, ReasonUnlinkedWrapper
 	}
-	// A Distributed table stores nothing of its own; the question belongs to the
-	// local table it fronts.
-	if in.isDistributed {
-		return VerdictUnknown, ReasonDistributed
+	// A Distributed, Merge or view table stores nothing of its own; the question
+	// belongs to the tables underneath it.
+	if in.virtualReason != "" {
+		return VerdictUnknown, in.virtualReason
 	}
 
 	if !in.referenced {
@@ -804,14 +824,18 @@ type UnusedReport struct {
 
 // BuildUnusedReport walks every table and collects column verdicts.
 //
-// Distributed tables are skipped entirely: they store nothing of their own, so a
-// column of one is never the thing you drop. Rows come out ordered by database,
-// table and column position, so the report is stable between refreshes.
+// Tables whose engine stores nothing — Distributed, Merge, MaterializedView,
+// View — are skipped entirely: a column of one is never the thing you drop.
+// Rows come out ordered by database, table and column position, so the report is
+// stable between refreshes.
 func BuildUnusedReport(snapshot SchemaSnapshot, index UsageIndex, state GrafanaState, filters UnusedReportFilters) UnusedReport {
 	report := UnusedReport{Rows: []UnusedReportRow{}}
 
 	for _, table := range snapshot.Tables() {
-		if ClassifyEngine(snapshot.Engines[table]) == EngineDistributed {
+		// Engines that store nothing never reach the report: a column of one is
+		// not the thing you drop, and listing it would send a reader to alter a
+		// routing definition instead of a table.
+		if virtualEngineReason(snapshot.Engines[table]) != "" {
 			continue
 		}
 

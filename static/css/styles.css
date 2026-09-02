@@ -1539,3 +1539,11 @@ a.usage-dashboard:hover { text-decoration: underline; }
   font-family: inherit;
   font-size: 11px;
 }
+
+ul.usage-panels {
+  margin: 3px 0 0;
+  padding-left: 12px;
+  list-style: none;
+  border-left: 1px solid var(--border);
+}
+ul.usage-panels > li { padding: 2px 0; }

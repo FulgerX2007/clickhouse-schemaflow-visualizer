@@ -887,14 +887,45 @@ function decorateColumnsWithUsage(cols, usage) {
     });
 }
 
+// allRefs flattens a column's evidence.
+function allRefs(entry) {
+    return [...(entry.direct || []), ...(entry.derived || [])];
+}
+
+// groupRefsByDashboard collapses panel-level references into one entry per
+// dashboard. A single dashboard can read a column from dozens of panels, and
+// through a materialized view every panel of it contributes a reference.
+function groupRefsByDashboard(refs) {
+    const groups = new Map();
+    refs.forEach((ref) => {
+        const key = ref.dashboard_uid || ref.dashboard_title || '?';
+        if (!groups.has(key)) {
+            groups.set(key, { dashboard: ref, panels: [], via: new Set(), heuristic: false });
+        }
+        const group = groups.get(key);
+        group.panels.push(ref);
+        if (ref.via) group.via.add(ref.via);
+        if (ref.confidence === 'heuristic') group.heuristic = true;
+    });
+    return [...groups.values()];
+}
+
 function verdictBadge(entry) {
     const badge = document.createElement('span');
     badge.className = `verdict-badge verdict-${entry.verdict}`;
-    const count = (entry.direct || []).length + (entry.derived || []).length;
+    const refs = allRefs(entry);
+    const groups = groupRefsByDashboard(refs);
     badge.textContent = VERDICT_LABELS[entry.verdict] || entry.verdict;
-    if (count > 0) badge.textContent += ` (${count})`;
+    // Count dashboards, not references: one dashboard reading a column from
+    // thirty panels is still one dashboard, and "(30)" would read as thirty.
+    if (groups.length > 0) badge.textContent += ` (${groups.length})`;
 
     const title = [VERDICT_TITLES[entry.verdict] || ''];
+    if (groups.length > 0) {
+        const panels = refs.length;
+        title.push(`Read by ${groups.length} dashboard${groups.length === 1 ? '' : 's'}`
+            + ` across ${panels} panel quer${panels === 1 ? 'y' : 'ies'}.`);
+    }
     if (entry.reason) title.push(`Reason: ${entry.reason}`);
     badge.title = title.filter(Boolean).join('\n');
     return badge;
@@ -903,7 +934,7 @@ function verdictBadge(entry) {
 // usageEvidence lists the dashboards behind a verdict, with the SQL that proves
 // it. Every node is created rather than templated.
 function usageEvidence(entry) {
-    const refs = [...(entry.direct || []), ...(entry.derived || [])];
+    const refs = allRefs(entry);
     if (!refs.length) {
         if (!entry.reason) return null;
         const note = document.createElement('p');
@@ -915,7 +946,9 @@ function usageEvidence(entry) {
     const list = document.createElement('ul');
     list.className = 'usage-evidence';
 
-    refs.forEach((ref) => {
+    // One entry per dashboard, with its panels nested underneath.
+    groupRefsByDashboard(refs).forEach((group) => {
+        const ref = group.dashboard;
         const item = document.createElement('li');
 
         const link = document.createElement(ref.dashboard_url ? 'a' : 'span');
@@ -931,32 +964,52 @@ function usageEvidence(entry) {
         }
         item.appendChild(link);
 
-        if (ref.panel_title) {
-            const panel = document.createElement('span');
-            panel.className = 'usage-panel';
-            panel.textContent = ` › ${ref.panel_title}`;
-            item.appendChild(panel);
+        const named = group.panels.filter((panel) => panel.panel_title);
+        if (named.length > 1) {
+            const count = document.createElement('span');
+            count.className = 'usage-panel';
+            count.textContent = ` — ${named.length} panels`;
+            item.appendChild(count);
         }
-        if (ref.via) {
-            const via = document.createElement('span');
-            via.className = 'usage-via';
-            via.textContent = ref.via;
-            via.title = 'Reached through ClickHouse lineage, not read directly.';
-            item.appendChild(via);
-        }
-        if (ref.confidence === 'heuristic') {
+
+        group.via.forEach((via) => {
+            const tag = document.createElement('span');
+            tag.className = 'usage-via';
+            tag.textContent = via;
+            tag.title = 'Reached through ClickHouse lineage, not read directly.';
+            item.appendChild(tag);
+        });
+        if (group.heuristic) {
             const guess = document.createElement('span');
             guess.className = 'usage-heuristic';
             guess.textContent = 'heuristic';
             guess.title = 'Attributed by matching names, not by parsing. Cannot license an unused verdict.';
             item.appendChild(guess);
         }
-        if (ref.snippet) {
-            const snippet = document.createElement('code');
-            snippet.className = 'usage-snippet';
-            snippet.textContent = ref.snippet;
-            item.appendChild(snippet);
+
+        const panels = document.createElement('ul');
+        panels.className = 'usage-panels';
+        named.slice(0, 6).forEach((panel) => {
+            const row = document.createElement('li');
+            const title = document.createElement('span');
+            title.className = 'usage-panel';
+            title.textContent = panel.panel_title;
+            row.appendChild(title);
+            if (panel.snippet) {
+                const snippet = document.createElement('code');
+                snippet.className = 'usage-snippet';
+                snippet.textContent = panel.snippet;
+                row.appendChild(snippet);
+            }
+            panels.appendChild(row);
+        });
+        if (named.length > 6) {
+            const more = document.createElement('li');
+            more.className = 'usage-panel';
+            more.textContent = `… and ${named.length - 6} more panels`;
+            panels.appendChild(more);
         }
+        if (panels.childElementCount) item.appendChild(panels);
 
         list.appendChild(item);
     });
