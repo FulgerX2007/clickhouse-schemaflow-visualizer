@@ -665,14 +665,39 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 **Files:**
 - Modify: `models/grafana_sql.go`, `models/grafana_sql_test.go`
 
-- [ ] regex-extract `FROM`/`JOIN` table refs (backticks, quotes, `db.table`) when the AST parse failed
-- [ ] word-boundary match candidate tables' known column names, skipping SQL keywords and function names
-- [ ] emit `Confidence: heuristic`; attribute an ambiguous name to **all** candidates (conservative — over-reports `used`)
-- [ ] wire `ResolveQuery` to try AST → fall back to heuristic → never return zero references *and* zero error silently
-- [ ] add the **env-gated corpus test**: when `GRAFANA_DASHBOARDS_DIR` is set, parse every SQL string and report AST-success / heuristic-fallback / failure counts; `t.Skip` when unset
-- [ ] run the corpus test against the real 172-file corpus (167 unique dashboards) and **record the three counts in this plan** — the probe predicts near-total AST success, so a low number means something is wrong with the integration, not with the parser choice
-- [ ] write tests for deliberately unparseable SQL, ambiguous joined columns, keyword-named columns, a table with no known columns
-- [ ] run tests — must pass before task 8
+- [x] regex-extract `FROM`/`JOIN` table refs (backticks, quotes, `db.table`) when the AST parse failed
+- [x] match candidate tables' known column names against the query's identifier tokens
+- [x] emit `Confidence: heuristic`; attribute an ambiguous name to **all** candidates (conservative — over-reports `used`)
+- [x] wire `ResolveQuery` to try AST → fall back to heuristic → never return zero references *and* zero error silently
+- [x] add the **env-gated corpus test**: when `GRAFANA_DASHBOARDS_DIR` is set, parse every SQL string and report AST-success / heuristic-fallback / failure counts; `t.Skip` when unset
+- [x] run the corpus test against the real 172-file corpus (167 unique dashboards) and **record the three counts in this plan**
+- [x] write tests for deliberately unparseable SQL, ambiguous joined columns, keyword-named columns, a table with no known columns
+- [x] run tests — must pass before task 8
+
+**Task 7 notes**
+
+- **Deviation: the fallback works from the schema inward, not from the SQL outward.** The checklist
+  said to match column names "skipping SQL keywords and function names". That framing belongs to the
+  opposite algorithm — pulling identifiers out of the SQL and deciding which are columns. Instead the
+  resolver tokenises the query once and asks, for each column the table is *known* to have, whether
+  that token appears. Two consequences, both good: a column genuinely named `count`, `status` or
+  `select` is found rather than skipped as a keyword (skipping it would have risked a false `unused`),
+  and the cost is one tokenisation instead of a regex per column.
+- A table the schema does not know is **not** recorded. In a query the parser already rejected, an
+  unrecognised `FROM` token is far more likely a CTE name or an alias than a real table, and recording
+  it would invent a table for the report.
+- `ResolveQuery` keeps the AST's `ParseError` even when the fallback produced references, so the
+  verdict pass can hold back an `unused` claim about anything the query touched.
+- `ColumnLookup` is the seam to the schema. Pattern names are handed to it whole, so the Task 8
+  implementation unions the columns of every table a pattern matches.
+
+**`TestCorpusResolution`** is now a permanent, env-gated measurement instrument: it skips unless
+`GRAFANA_DASHBOARDS_DIR` is set, and fails if the AST parse rate drops below the plan's 70% gate.
+Current reading against the reference corpus:
+
+```
+dashboards=167 queries=1177 parsed=1089 (92.5%) refs exact=5994 heuristic=964
+```
 
 ### Task 8: Pure usage domain and the ClickHouse seam
 

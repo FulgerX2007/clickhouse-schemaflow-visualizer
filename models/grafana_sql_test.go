@@ -587,3 +587,193 @@ func TestNormalizeQueryRepairsIntervalOperands(t *testing.T) {
 		})
 	}
 }
+
+// ─── Heuristic fallback ──────────────────────────────────────────────────────
+
+// schemaLookup builds a ColumnLookup from a literal schema, expanding patterns
+// the way the real one will.
+func schemaLookup(schema map[string][]string) ColumnLookup {
+	return func(table string) []string {
+		if columns, ok := schema[table]; ok {
+			return columns
+		}
+		union := []string{}
+		for name, columns := range schema {
+			if TablePatternMatches(table, name) {
+				union = append(union, columns...)
+			}
+		}
+		sort.Strings(union)
+		return union
+	}
+}
+
+// SQL the parser refuses still has to yield usage, or the columns it reads look
+// untouched.
+func TestResolveQueryFallsBackWhenParsingFails(t *testing.T) {
+	schema := map[string][]string{
+		"shop.orders": {"id", "amount", "created_at", "never_touched"},
+	}
+
+	// A trailing garbage clause the parser cannot accept.
+	sql := "SELECT id, amount FROM shop.orders WHERE ((( GROUP BY"
+
+	got := ResolveQuery(sql, nil, "defaultdb", 200, schemaLookup(schema))
+
+	if got.ParseError == "" {
+		t.Fatal("expected the parse error to be preserved")
+	}
+	if len(got.Tables) != 1 || got.Tables[0] != "shop.orders" {
+		t.Fatalf("Tables = %v, want [shop.orders]", got.Tables)
+	}
+
+	found := map[string]Confidence{}
+	for _, reference := range got.References {
+		found[reference.Column] = reference.Confidence
+	}
+	for _, column := range []string{"id", "amount"} {
+		if found[column] != ConfidenceHeuristic {
+			t.Errorf("column %q = %q, want a heuristic reference", column, found[column])
+		}
+	}
+	// A column the query never names must not be invented.
+	if _, ok := found["never_touched"]; ok {
+		t.Error("never_touched was reported as read")
+	}
+	// created_at is not named either.
+	if _, ok := found["created_at"]; ok {
+		t.Error("created_at was reported as read")
+	}
+}
+
+// Working from the schema inward means a column really named like a keyword or
+// a function is still found.
+func TestResolveQueryHeuristicFindsKeywordNamedColumns(t *testing.T) {
+	schema := map[string][]string{
+		"db.events": {"count", "status", "from_host", "select"},
+	}
+
+	got := ResolveQuery("SELECT count, status, from_host, select FROM db.events WHERE (((", nil, "db", 200, schemaLookup(schema))
+
+	if got.ParseError == "" {
+		t.Fatal("expected a parse failure so the fallback runs")
+	}
+	found := map[string]bool{}
+	for _, reference := range got.References {
+		found[reference.Column] = true
+	}
+	for _, column := range []string{"count", "status", "from_host", "select"} {
+		if !found[column] {
+			t.Errorf("column %q was missed: %v", column, refKeys(got))
+		}
+	}
+}
+
+// A name shared by both sides of a join goes to both: over-reporting keeps a
+// column alive, under-reporting would mark a live one droppable.
+func TestResolveQueryHeuristicAttributesAmbiguousColumnsToEveryCandidate(t *testing.T) {
+	schema := map[string][]string{
+		"db.a": {"shared", "only_a"},
+		"db.b": {"shared", "only_b"},
+	}
+
+	got := ResolveQuery("SELECT shared, only_a FROM db.a JOIN db.b ON (((", nil, "db", 200, schemaLookup(schema))
+
+	if got.ParseError == "" {
+		t.Fatal("expected a parse failure so the fallback runs")
+	}
+	keys := strings.Join(refKeys(got), " ")
+	for _, want := range []string{"db.a:shared(heuristic)", "db.b:shared(heuristic)", "db.a:only_a(heuristic)"} {
+		if !strings.Contains(keys, want) {
+			t.Errorf("missing %s in %v", want, refKeys(got))
+		}
+	}
+	if strings.Contains(keys, "only_b") {
+		t.Errorf("only_b is not named by the query: %v", refKeys(got))
+	}
+}
+
+// A name the schema does not know is a CTE, an alias, or a table this app cannot
+// see. Recording it would invent a table for the report.
+func TestResolveQueryHeuristicIgnoresUnknownTables(t *testing.T) {
+	schema := map[string][]string{"db.real": {"x"}}
+
+	got := ResolveQuery("SELECT x FROM db.real JOIN not_a_table ON (((", nil, "db", 200, schemaLookup(schema))
+
+	if len(got.Tables) != 1 || got.Tables[0] != "db.real" {
+		t.Errorf("Tables = %v, want only the known table", got.Tables)
+	}
+}
+
+func TestResolveQueryHeuristicExpandsTablePatterns(t *testing.T) {
+	schema := map[string][]string{
+		"traffic.agg_6min_distributed": {"region", "bytes"},
+		"traffic.agg_1h_distributed":   {"region", "bytes"},
+		"traffic.unrelated":            {"other"},
+	}
+
+	got := ResolveQuery(
+		"SELECT region FROM traffic.agg_${period}_distributed WHERE (((",
+		[]TemplateVariable{{Name: "period"}}, "traffic", 200, schemaLookup(schema),
+	)
+
+	if len(got.Tables) != 1 || !IsTablePattern(got.Tables[0]) {
+		t.Fatalf("Tables = %v, want one pattern", got.Tables)
+	}
+	if len(got.References) == 0 {
+		t.Fatal("the pattern resolved to no columns")
+	}
+	for _, reference := range got.References {
+		if reference.Column == "other" {
+			t.Errorf("an unrelated table's column was matched: %v", refKeys(got))
+		}
+	}
+}
+
+// The AST is preferred whenever it succeeds, so a parseable query never
+// degrades to heuristic confidence.
+func TestResolveQueryPrefersTheAST(t *testing.T) {
+	schema := map[string][]string{"shop.orders": {"id", "amount"}}
+
+	got := ResolveQuery("SELECT id FROM shop.orders", nil, "defaultdb", 200, schemaLookup(schema))
+
+	if got.ParseError != "" {
+		t.Fatalf("ParseError = %q", got.ParseError)
+	}
+	if len(got.References) != 1 || got.References[0].Confidence != ConfidenceExact {
+		t.Errorf("references = %v, want one exact", refKeys(got))
+	}
+}
+
+// Without a schema the fallback can still say which query failed, but it must
+// not silently return nothing at all.
+func TestResolveQueryWithoutLookupStillReportsTheFailure(t *testing.T) {
+	got := ResolveQuery("SELECT a FROM db.t WHERE (((", nil, "db", 200, nil)
+
+	if got.ParseError == "" {
+		t.Error("ParseError is empty, so the caller cannot tell the query was unreadable")
+	}
+}
+
+func TestQualifyName(t *testing.T) {
+	tests := []struct {
+		name            string
+		input           string
+		defaultDatabase string
+		want            string
+	}{
+		{name: "already qualified", input: "db.t", defaultDatabase: "other", want: "db.t"},
+		{name: "bare name takes the default", input: "t", defaultDatabase: "db", want: "db.t"},
+		{name: "no default leaves it bare", input: "t", defaultDatabase: "", want: "t"},
+		{name: "empty", input: "  ", defaultDatabase: "db", want: ""},
+		{name: "trailing dot is nonsense", input: "db.", defaultDatabase: "db", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := qualifyName(tt.input, tt.defaultDatabase); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

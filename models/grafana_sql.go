@@ -541,3 +541,114 @@ func truncateSnippet(sql string, limit int) string {
 	}
 	return compact[:limit] + "…"
 }
+
+// ─── Heuristic fallback ──────────────────────────────────────────────────────
+
+var (
+	// A table token after FROM or JOIN, once the AST has already refused the
+	// query. A subquery opens with "(" and is not matched.
+	heuristicTablePattern = regexp.MustCompile("(?i)\\b(?:from|join)\\s+([`\"']?[A-Za-z0-9_$.]+[`\"']?)")
+	// Every identifier-shaped token in a query.
+	identifierPattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+)
+
+// ColumnLookup returns the columns of a qualified table. The name may be a
+// pattern produced by variable expansion, in which case the implementation is
+// expected to union the columns of every table it matches.
+type ColumnLookup func(qualifiedTable string) []string
+
+// ResolveQuery reads one query, preferring the AST and falling back to text
+// matching when the parser refuses it.
+//
+// The fallback never produces an exact reference, so nothing it finds can
+// license an "unused" verdict on its own. That is the point: it exists to keep a
+// query that cannot be parsed from looking like a query that reads nothing.
+func ResolveQuery(sql string, variables []TemplateVariable, defaultDatabase string, snippetChars int, lookup ColumnLookup) QueryParseResult {
+	normalized := normalizeQuery(sql, variables)
+	snippet := truncateSnippet(sql, snippetChars)
+
+	result := resolveQueryAST(normalized, defaultDatabase, snippet)
+	if result.ParseError == "" {
+		return result
+	}
+
+	fallback := resolveQueryHeuristic(normalized, defaultDatabase, snippet, lookup)
+	// Keep the parse error: the verdict pass uses it to hold back an "unused"
+	// claim about anything this query touched.
+	fallback.ParseError = result.ParseError
+	return fallback
+}
+
+// resolveQueryHeuristic attributes columns by matching a table's known column
+// names against the query text.
+//
+// It works from the schema inward rather than from the SQL outward, which avoids
+// the usual trap: a column really named "count" or "status" is found because we
+// are looking for it, not skipped because it resembles a keyword. Anything it
+// finds is over-reported at worst, and over-reporting keeps a column alive.
+func resolveQueryHeuristic(normalized NormalizedQuery, defaultDatabase, snippet string, lookup ColumnLookup) QueryParseResult {
+	result := QueryParseResult{
+		SelectStar:   strings.Contains(normalized.SQL, "*"),
+		OpaqueColumn: strings.Contains(normalized.SQL, varMarker),
+	}
+	if lookup == nil {
+		return result
+	}
+
+	tokens := map[string]bool{}
+	for _, token := range identifierPattern.FindAllString(normalized.SQL, -1) {
+		tokens[token] = true
+	}
+
+	seenTable := map[string]bool{}
+	seenRef := map[string]bool{}
+
+	for _, match := range heuristicTablePattern.FindAllStringSubmatch(normalized.SQL, -1) {
+		table := qualifyName(strings.Trim(match[1], "`\"'"), defaultDatabase)
+		if table == "" || seenTable[table] {
+			continue
+		}
+		seenTable[table] = true
+
+		columns := lookup(table)
+		if len(columns) == 0 {
+			// Unknown to ClickHouse: a CTE name, an alias, or a table this app
+			// cannot see. Recording it would invent a table for the report.
+			continue
+		}
+		result.Tables = append(result.Tables, table)
+
+		database, name := splitQualified(table)
+		for _, column := range columns {
+			if !tokens[column] {
+				continue
+			}
+			key := table + "\x00" + column
+			if seenRef[key] {
+				continue
+			}
+			seenRef[key] = true
+			result.References = append(result.References, QueryReference{
+				Database:   database,
+				Table:      name,
+				Column:     column,
+				Confidence: ConfidenceHeuristic,
+				Snippet:    snippet,
+			})
+		}
+	}
+
+	return result
+}
+
+// qualifyName supplies the default database for an unqualified table name.
+func qualifyName(name, defaultDatabase string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.HasSuffix(name, ".") {
+		return ""
+	}
+	if strings.Contains(name, ".") || defaultDatabase == "" {
+		return name
+	}
+	return defaultDatabase + "." + name
+}
