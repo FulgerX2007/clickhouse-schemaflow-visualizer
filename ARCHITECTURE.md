@@ -145,4 +145,45 @@ Significant, hard-to-reverse choices are recorded as ADRs in
 - Freeze five `EngineType` values as the styling contract shared by `ClassifyEngine` (models/graph.go), `classifyEngine()`/`glyphFor()` (static/js/app.js:16, :887), the legend (static/html/index.html), and the CSS classes (static/css/styles.css).
 - Render with a hand-written Dagre + inline-SVG renderer (static/js/diagram.js). Note the stale metadata: `.goreleaser.yaml`'s nfpm `description` and `rpm.summary` still describe "Mermaid.js diagrams", which the code no longer uses.
 - Bound relation traversal at `maxRelationDepth = 50` (models/clickhouse.go:16) and exclude `Distributed` tables from column-level graphs (models/graph.go).
-- Gate CI entirely on `v*` tags: neither `.github/workflows/release.yml` nor `.github/workflows/docker-publish.yml` runs on push to `master` or on pull requests, so nothing is checked automatically before a tag exists. The repository also contains zero `*_test.go` files, so the `go test ./...` step in the release workflow reports "no test files" for all four packages.
+- Gate CI entirely on `v*` tags: neither `.github/workflows/release.yml` nor `.github/workflows/docker-publish.yml` runs on push to `master` or on pull requests, so nothing is checked automatically before a tag exists. The `go test ./...` step in the release workflow does now assert something — `api` and `models` carry tests — but it still runs only on a tag, so nothing checks a pull request.
+
+
+## Grafana column usage
+
+An optional second lineage source, added on top of the ClickHouse-only picture above. It
+answers "which columns does nobody read?" by mapping Grafana dashboards to the columns
+their SQL touches, then propagating that usage along ClickHouse's own lineage.
+
+```
+  source                extract              resolve                    index
+  ──────────────        ─────────────        ───────────────────        ──────────────────
+  Grafana API      →    panels           →   expand ${vars}         →   references per
+   or JSON dir          + row.panels         AST parse ────┐             (db, table, column)
+  (grafana.go)          + templating                       ↓           + lineage propagation
+                        (grafana.go)         heuristic fallback        + four-state verdicts
+                                             (grafana_sql.go)          (usage.go)
+```
+
+`models/grafana_index.go` orchestrates: an asynchronous first scan, a TTL, an explicit
+refresh, and a state machine (`disabled` / `scanning` / `error` / `ok`) that every
+endpoint and every verdict is gated on.
+
+**Components**
+
+| File | Responsibility |
+|---|---|
+| `models/grafana.go` | Config, `DashboardSource` (API + directory + fallback pair), panel and variable extraction |
+| `models/grafana_sql.go` | Variable expansion, AST resolution via `clickhouse-sql-parser`, heuristic fallback |
+| `models/usage.go` | `SchemaSnapshot` (2 queries), usage index, lineage propagation, verdicts, report |
+| `models/grafana_index.go` | Scan orchestration, caching, state, statistics |
+| `api/handlers.go` | Four routes, all gated on the state envelope |
+| `static/js/app.js`, `static/css/styles.css` | Usage column in the inspector, unused-columns report section |
+
+**Dependency added:** `github.com/AfterShip/clickhouse-sql-parser` v0.5.6 — the first new
+direct dependency since the original four. Rationale and measurements in
+`docs/decisions/0001-sql-parser-dependency.md`.
+
+**Data-flow note.** This is the only part of the application that reaches outside
+ClickHouse. It is still read-only on both sides: `SELECT` against `system.columns` and
+`system.tables`, and `GET` against the Grafana API. `POST /api/grafana/refresh` rebuilds
+an in-process cache and nothing else.

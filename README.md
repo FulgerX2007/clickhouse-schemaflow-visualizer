@@ -34,6 +34,8 @@ An open-source web application for visualizing ClickHouse table relationships. I
 - 🔦 Click a column in the Relationships view to highlight its full data path through the pipeline
 - ⌨️ Live sidebar filter and a `Ctrl+K` / `⌘K` command palette to jump to any table, column, or engine
 - 📈 Optional metadata overlay showing row counts and on-disk size per table
+- 🧹 **Unused columns** view — which columns no Grafana dashboard reads, so dead schema can be found and dropped (optional; off unless Grafana is configured)
+- 🔗 Per-column dashboard lineage in the inspector: which dashboard and panel reads each column, with the SQL that proves it
 - 💾 Export the current diagram as a standalone HTML file (self-contained, no external assets)
 - 🔒 TLS connection to ClickHouse with optional skip-verify and custom CA / client certificates
 - 📱 Responsive layout that works on desktop and tablet viewports
@@ -113,6 +115,18 @@ Requires Go 1.26 or newer (see `go.mod`).
    # Web Interface Settings
    SERVER_ADDR=:8080
    GIN_MODE=debug
+
+   # Grafana column usage (optional — leave unset to disable the feature entirely)
+   # Either the API…
+   # GRAFANA_URL=https://grafana.example.com
+   # GRAFANA_TOKEN=              # service account, Viewer role is enough
+   # …or a directory of dashboard JSON, which needs no credentials:
+   # GRAFANA_DASHBOARDS_DIR=/etc/grafana/dashboards
+   # GRAFANA_SKIP_VERIFY=false
+   # GRAFANA_TIMEOUT=30s
+   # GRAFANA_CACHE_TTL=15m
+   # GRAFANA_DEFAULT_DATABASE=   # defaults to CLICKHOUSE_DATABASE
+   # GRAFANA_SNIPPET_CHARS=200   # 0 omits SQL snippets from responses
    ```
 
 3. Install Go dependencies:
@@ -126,6 +140,39 @@ Requires Go 1.26 or newer (see `go.mod`).
    ```
 
 5. Access the web interface at http://localhost:8080
+
+## 🧹 Finding unused columns
+
+Point the app at Grafana and it will tell you which ClickHouse columns nobody reads.
+
+Set either `GRAFANA_URL` + `GRAFANA_TOKEN` (a Viewer service account) or
+`GRAFANA_DASHBOARDS_DIR` (a directory of dashboard JSON — no credentials needed). An
+**Unused columns** tab then appears, and every column in the table inspector gets a
+verdict. **With neither set, the feature is off and the UI carries no trace of it.**
+
+Usage is traced through ClickHouse's own lineage, which is the part that matters: a
+dashboard querying a `Distributed` wrapper marks the local table behind it, and a
+dashboard reading a materialized view's destination marks every source column that view
+reads. A column can be in use without any dashboard naming its table.
+
+Columns get one of four verdicts, and **only one of them means safe to drop**:
+
+| Verdict | Meaning | Safe to drop |
+|---|---|---|
+| `used` | a dashboard reads it, lineage reaches it, or it is part of a primary/sorting/partition key | no |
+| **`unused`** | the table is read, every query reading it was fully understood, and none name this column | **yes** |
+| `unknown` | the table is read, but a query touching it used `SELECT *`, a variable column, or could not be parsed | no |
+| `no-coverage` | nothing observed reads the table at all — which is not evidence its columns are dead | no |
+
+Three deliberate refusals: a key column is never reported unused, because
+`ALTER TABLE … DROP COLUMN` refuses to remove one; a `Distributed` table's columns are
+never reported unused, because it stores nothing of its own; and if Grafana is switched
+off, still scanning or unreachable, **every** column reads `no-coverage` rather than
+`unused` — an absent scan looks exactly like a Grafana in which nothing is used.
+
+`unused` also means *unused by Grafana*. Ad-hoc queries, applications and scheduled jobs
+are invisible to it, and the report says so in its own caveats. Cross-check before
+dropping anything.
 
 ## 📖 Usage
 

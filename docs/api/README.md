@@ -91,7 +91,11 @@ All paths are relative to the listen address, `SERVER_ADDR` (default `:8080`, `m
 | `GET /api/columns` | Flat column index across all allowed databases, backing the `Ctrl+K` / `⌘K` palette (`api/handlers.go:71-78`) | None |
 | `GET /api/dataflow/:database/:table` | Table-level DAG of upstream sources and downstream materializations (`api/handlers.go:82-98`) | None |
 | `GET /api/relationships/:database/:table` | Column-level DAG with transformation expressions on the edges (`api/handlers.go:102-118`) | None |
-| `GET /api/table/:database/:table` | Table details and column list for the inspector panel (`api/handlers.go:123-139`) | None |
+| `GET /api/table/:database/:table` | Table details and column list for the inspector panel | None |
+| `GET /api/grafana/status` | Whether Grafana column usage is available, and why not when it is not | None |
+| `GET /api/grafana/usage/:database/:table` | Per-column verdicts and the dashboards behind them | None |
+| `GET /api/grafana/unused` | Column verdicts across the schema, with totals and caveats | `database`, `verdict` |
+| `POST /api/grafana/refresh` | Re-scan the dashboard source; debounced by `GRAFANA_CACHE_TTL` | None |
 | `GET /` | Renders `static/html/index.html` through `html/template` with a per-process `{{.BuildID}}` cache-buster (`main.go:74-80`) | None |
 | `GET /static/*` | Frontend assets from `./static` on disk, served with `Cache-Control: no-cache` (`main.go:60-66`) | None |
 
@@ -252,3 +256,94 @@ rejects the empty string (`api/handlers.go:86`, `106`, `127`).
   (`main.go:60-66`), which permits caching but forces revalidation; combined with Gin's
   `Last-Modified`, unchanged files round-trip as `304`s. Both routes resolve paths relative
   to the process working directory.
+
+
+## Grafana column usage
+
+Four routes added by the column-usage feature. They are optional: with no `GRAFANA_*`
+variable set the feature is off and every one of them answers
+`200 {"state":"disabled","reason":"not configured"}`.
+
+### The state envelope
+
+Every Grafana route answers with a top-level `state`, and **only `ok` carries a payload**:
+
+| `state` | Meaning | Body |
+|---|---|---|
+| `disabled` | no dashboard source configured | `{"state":"disabled","reason":"not configured"}` |
+| `scanning` | the first scan has not completed | `{"state":"scanning", …}` |
+| `error` | configured but the scan failed | `{"state":"error","error":"…", …}` |
+| `ok` | usage is available | the payload, plus `"state":"ok"` |
+
+The payload is withheld outside `ok` on purpose. An empty usage payload and a real one
+showing nothing read are indistinguishable to a reader, and acting on that difference is
+what drops a live column.
+
+This deviates from the repository's `400`/`500`/`200` convention: a switched-off feature
+answers `200` with a state rather than an error status, so the frontend has one branch
+instead of four. The deviation is deliberate — see `docs/decisions/0002-four-state-column-verdicts.md`.
+
+### `GET /api/grafana/status`
+
+```json
+{
+  "state": "ok",
+  "mode": "dir",
+  "scanned_at": "2026-09-02T16:53:09Z",
+  "stats": { "dashboards": 1, "panels": 2, "queries": 2,
+             "parsed": 2, "heuristic": 0, "failed": 0, "skipped": 0 },
+  "warnings": ["…"]
+}
+```
+
+`mode` is the source that produced the scan: `api`, `dir`, or `api-fallback-dir` when an
+API scan failed and the directory took over. The service-account token never appears.
+
+### `GET /api/grafana/usage/:database/:table`
+
+```json
+{
+  "state": "ok",
+  "usage": {
+    "database": "raw", "table": "flights_local", "engine": "ReplicatedMergeTree",
+    "columns": [
+      { "column": "origin", "type": "String", "verdict": "used",
+        "reason": "read-through-lineage",
+        "derived": [ { "dashboard_uid": "flights-e2e", "dashboard_title": "Flight Operations",
+                       "dashboard_url": "https://grafana/d/flights-e2e", "panel_id": 1,
+                       "panel_title": "Delays by route",
+                       "via": "mv:aggregated.flight_stats_daily_mv",
+                       "confidence": "exact", "snippet": "SELECT day, origin, …" } ] }
+    ],
+    "dashboards": [ … ], "used_count": 5, "unused_count": 4, "unknown_count": 0
+  }
+}
+```
+
+`direct` references read this table; `derived` ones arrived through a `Distributed`
+wrapper or a materialized view, named by `via`. `confidence` is `exact` (the AST tied the
+column to one table) or `heuristic` (a guess that cannot license an `unused` verdict).
+
+### `GET /api/grafana/unused`
+
+`?database=` and `?verdict=` narrow the rows. Totals always count the whole schema, not
+the filtered subset, and `caveats` states what the report cannot see.
+
+```json
+{ "state": "ok",
+  "report": {
+    "rows": [ { "database": "raw", "table": "flights_local", "engine": "ReplicatedMergeTree",
+                "column": "status", "type": "LowCardinality(String)",
+                "verdict": "unused", "dashboards": 1 } ],
+    "caveats": ["Reflects Grafana dashboards only. …"],
+    "totals": { "used": 13, "unused": 10, "unknown": 0, "no_coverage": 12 } } }
+```
+
+Verdicts are defined in `docs/decisions/0002-four-state-column-verdicts.md`. **Only
+`unused` licenses dropping a column.**
+
+### `POST /api/grafana/refresh`
+
+The only non-`GET` route in the API. It writes nothing to ClickHouse — it rebuilds an
+in-process cache — and is debounced by `GRAFANA_CACHE_TTL`; a call inside that window
+returns the current status with `"debounced": true`.

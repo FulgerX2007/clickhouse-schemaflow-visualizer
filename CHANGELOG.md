@@ -11,12 +11,61 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ### Added
 
+- **Grafana column usage.** Optional feature that maps Grafana dashboards to the
+  ClickHouse columns they read, so unused columns can be found. Off unless configured:
+  with no `GRAFANA_*` variable the application and UI are unchanged.
+  - Dashboards are read from the Grafana HTTP API (`GRAFANA_URL` + `GRAFANA_TOKEN`) or
+    from a directory of JSON files (`GRAFANA_DASHBOARDS_DIR`, no credentials). Set both
+    and the API is primary with the directory as a fallback, reported as
+    `mode: api-fallback-dir`.
+  - Panel queries and templating variables are resolved with
+    `github.com/AfterShip/clickhouse-sql-parser` (new direct dependency, pinned v0.5.6),
+    falling back to name matching when a query will not parse. Grafana template variables
+    are expanded first; a variable inside a table name becomes a pattern matching every
+    table it can name.
+  - Usage propagates along ClickHouse lineage: a dashboard on a `Distributed` wrapper
+    marks the local table, and one reading a materialized view's destination marks every
+    source column the view reads.
+  - Columns get one of four verdicts — `used`, `unused`, `unknown`, `no-coverage` — of
+    which only `unused` licenses a drop. Key columns and `Distributed` tables are never
+    reported unused, and no column is reported unused unless a dashboard scan completed.
+    See `docs/decisions/0002-four-state-column-verdicts.md`.
+  - New endpoints: `GET /api/grafana/status`, `GET /api/grafana/usage/:database/:table`,
+    `GET /api/grafana/unused`, and `POST /api/grafana/refresh` — the first non-`GET`
+    route in the API, debounced by `GRAFANA_CACHE_TTL`. It writes nothing to ClickHouse.
+  - New UI: a Usage column with per-column verdicts and dashboard evidence in the table
+    inspector, and an "Unused columns" report section. Both are created only when Grafana
+    is configured.
+  - Eight new environment variables, documented in `README.md`, `CLAUDE.md`,
+    `.env.example` and `docs/deployment/`.
+- **The repository's first tests.** Six `*_test.go` files covering `api/` and `models/`,
+  with JSON dashboard fixtures under `models/testdata/dashboards/`.
+  `models/grafana_corpus_test.go` is a measurement instrument: it skips unless
+  `GRAFANA_DASHBOARDS_DIR` names a real dashboard tree, and fails if the SQL parse rate
+  drops below 70%.
+- ADRs `docs/decisions/0001-sql-parser-dependency.md` and
+  `0002-four-state-column-verdicts.md`.
 - Documentation baseline: `PROJECT.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, this
   `CHANGELOG.md`, `.ai/rules.md`, and `docs/` with `api/`, `database/`, `deployment/`,
   `decisions/` (plus `adr-template.md`) and `diagrams/`.
 
 ### Changed
 
+- `models.GrafanaIndex` is the first component in the repository that invalidates a
+  cache: mutex-guarded, TTL'd, and rebuildable through `POST /api/grafana/refresh`.
+  `.ai/rules.md` rules 1 and 8 and the `CLAUDE.md` caching section are amended to say so.
+- `LoadSchemaSnapshot` warms `getTablesRelations` before building, because that cache is
+  otherwise filled lazily by the first `/api/databases` request and a background scan can
+  run before any request arrives.
+- `switchSection()` and `exportHtml()` in `static/js/app.js` generalised from hardcoded
+  two-way branches to N sections. Export HTML now declines on a non-diagram section
+  instead of exporting the wrong diagram.
+- Documentation corrected across `PROJECT.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`,
+  `docs/deployment/`, `CLAUDE.md` and `.ai/rules.md`, which all stated the repository had
+  zero test files.
+- `.ai/rules.md` rule 3: the `EngineType` styling contract spans **eleven** sites, not
+  ten — `exportHtml()`'s inline `:root` block redeclares the `--t-*-fg` variables
+  independently, and missing it leaves exported HTML rendering with an undefined variable.
 - `CLAUDE.md`: documented the cache lifecycle, the cross-file `EngineType` contract, the
   duplicated database-exclusion list, the `BuildID` asset requirement, and the verified
   build/vet/test/lint command set.

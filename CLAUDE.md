@@ -20,7 +20,7 @@ go build -o clickhouse-schemaflow-visualizer .
 # Checks before committing
 go vet ./...
 golangci-lint run
-go test ./...           # currently no test files in any package
+go test ./...           # api + models are covered; main + config have no tests
 go test ./models -run TestName -v   # single test, once tests exist
 
 # Run with test ClickHouse (creates ZooKeeper + ClickHouse + app)
@@ -44,6 +44,12 @@ docker-compose up -d
   - `GET /dataflow/:database/:table` — table-level DAG (upstream sources + downstream materializations) for the selected table
   - `GET /relationships/:database/:table` — column-level DAG with transformation expressions on the edges
   - `GET /table/:database/:table` — column details for a single table (used by the inspector panel)
+
+  Plus four routes for the optional Grafana column-usage feature (see below):
+  - `GET /grafana/status` — is dashboard usage available, and if not why
+  - `GET /grafana/usage/:database/:table` — per-column verdicts and the dashboards behind them
+  - `GET /grafana/unused` — column verdicts across the schema; `?database=`, `?verdict=`
+  - `POST /grafana/refresh` — **the only non-`GET` route**; rebuilds the in-process scan, debounced by `GRAFANA_CACHE_TTL`, and writes nothing to ClickHouse
 - `models/clickhouse.go` — ClickHouse client + TLS setup, engine-aware relation discovery (`getTablesRelations`), MV SELECT parsing (`parseViewQuery`, `extractColumnMappings`, `extractBaseColumnName`), column-matching heuristics (`areColumnsRelated`)
 - `models/graph.go` — the JSON graph payloads (`DataFlowGraph`, `RelationshipsGraph`, `ColumnIndexEntry`) and the builders behind the three graph endpoints
 - `config/config.go` — **dead code**: a parallel env loader that nothing imports. `main.go` builds `models.Config` itself. Change `main.go` when adding a config value; either update or delete `config/` rather than assuming it's wired up.
@@ -85,6 +91,42 @@ The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafa
 - `diagram.js` exposes `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})` and `.renderRelationships(container, graph, {onTableClick})`; `app.js` owns sidebar, palette, inspector, and Export HTML.
 - Export HTML inlines `commonDiagramCss()` from `app.js`, so diagram styling lives in two places — update both when changing node/edge appearance.
 
+### Grafana column usage (optional)
+
+Off unless `GRAFANA_URL`+`GRAFANA_TOKEN` or `GRAFANA_DASHBOARDS_DIR` is set. When off, the
+UI **creates no DOM node for it at all** and issues no request beyond the single status
+call — it is render-gated, not CSS-hidden.
+
+Pipeline, in `models/`:
+
+```
+grafana.go       source (API or directory) → []Dashboard → panels + template variables
+grafana_sql.go   expand ${vars} → AST parse (clickhouse-sql-parser) → heuristic fallback
+usage.go         SchemaSnapshot + references → UsageIndex → four-state verdicts → report
+grafana_index.go orchestration: async scan, TTL, refresh, state machine, mutex
+```
+
+Points that are easy to get wrong:
+
+- **`parser.Walk` aborts the whole traversal** when the callback returns `false`, despite
+  its doc comment saying it stops only that subtree. Never return `false` from it.
+- **A template variable is never substituted with one of its values.** It becomes the
+  marker `__gfvar__`; a table name carrying it is a *pattern* matching every table it
+  could name. Picking one value would resolve `agg_${period}_distributed` to a single
+  table and leave its siblings looking untouched.
+- **The two lineage edge families point opposite ways.** `getTablesRelations` emits
+  `{DependsOnTable: distributed, Table: local}` for a Distributed wrapper but
+  `{DependsOnTable: source, Table: view}` for an MV, so propagation is per-engine.
+- **MV propagation is table-level.** If anything downstream of a view is read, every
+  column the view's SELECT touches is read. `extractColumnMappings` cannot be used for
+  this: it resolves at most one source column per expression and leaves `SourceTable`
+  empty, so `SELECT a + b AS c` would make `b` look droppable.
+- **Verdicts require `state == ok`.** Any other state yields `no-coverage` for every
+  column. An absent scan is indistinguishable from a Grafana where nothing is used.
+- Key columns and `Distributed` tables are never reported `unused`.
+- The verdict pass costs **two** ClickHouse queries total (`BuildColumnIndex` plus one
+  `system.tables` read), not one per table.
+
 ## Configuration
 
 All via environment variables (or `.env` file), read in `main.go`:
@@ -104,6 +146,14 @@ All via environment variables (or `.env` file), read in `main.go`:
 | `CLICKHOUSE_SERVER_NAME` | (empty) | TLS SNI / cert verification name |
 | `SERVER_ADDR` | `:8080` | Listen address |
 | `GIN_MODE` | `debug` | `debug` or `release` |
+| `GRAFANA_URL` | (empty) | Grafana base URL; with `GRAFANA_TOKEN` enables API mode |
+| `GRAFANA_TOKEN` | (empty) | Service-account token — never logged, never in a response |
+| `GRAFANA_DASHBOARDS_DIR` | (empty) | Directory of dashboard JSON; enables directory mode with no credentials |
+| `GRAFANA_SKIP_VERIFY` | `false` | Skip TLS verification for the Grafana API |
+| `GRAFANA_TIMEOUT` | `30s` | Grafana HTTP timeout |
+| `GRAFANA_CACHE_TTL` | `15m` | Scan reuse window; also the refresh debounce |
+| `GRAFANA_DEFAULT_DATABASE` | `CLICKHOUSE_DATABASE` | Database assumed for unqualified table references |
+| `GRAFANA_SNIPPET_CHARS` | `200` | Max SQL snippet length in responses; `0` omits them |
 
 ## Testing
 

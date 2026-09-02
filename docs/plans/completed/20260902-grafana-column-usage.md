@@ -1,7 +1,12 @@
 # Grafana Column Usage
 
-> Revision 2 — incorporates an automated plan review plus direct verification of every claim it made.
-> Changes from revision 1 are summarised in **Review Outcomes** at the end.
+> **Completed 2026-09-02.** Tasks 1-14, 16 and 17 are done; Task 15 (the dashboard lineage diagram)
+> was deferred by the user and is the only unchecked work. Each task carries a notes block recording
+> what actually happened, including six design changes made against the plan and several bugs the
+> verification caught that reasoning had not.
+>
+> Revision 2 incorporated an automated plan review plus direct verification of every claim it made;
+> changes from revision 1 are summarised in **Review Outcomes** at the end.
 
 ## Overview
 
@@ -1043,7 +1048,11 @@ page — while the columns table renders exactly as it did before this feature e
 
 ### Task 15: [OPTIONAL — recommended to defer] Dashboard lineage diagram
 
-**Status: not required by either stated deliverable.** Task 13 already delivers the lineage browser
+**Status: DEFERRED — not built. Not required by either stated deliverable.** The user chose
+"decide later" when asked; both deliverables shipped without it. The unchecked boxes below are the
+work it would take if it is ever wanted, and the 11-site list is accurate as of this plan.
+
+**Original rationale:** not required by either stated deliverable. Task 13 already delivers the lineage browser
 with SQL proof. This task adds a third rendering surface for a structurally 2-level fan-out
 (table → panels → dashboards) that a list arguably renders more legibly than a DAG, and it costs a new
 node-kind styling contract across **11 sites**. The plan review recommended cutting it. Decide before
@@ -1094,20 +1103,28 @@ starting Task 13, since it also adds a fifth endpoint.
 
 ### Task 17: Update documentation
 
-Driven by `.ai/rules.md` *Documentation update requirements*, which is broader than a README pass.
+- [x] `README.md` — the feature, the four verdict states, and the new variables in the `.env` block
+- [x] `CLAUDE.md` — the pipeline, the config table, the endpoint list, and the corrected caching story
+- [x] `ARCHITECTURE.md` — components, data flow, the new dependency
+- [x] `docs/api/README.md` — the four new routes, the state envelope, and worked payloads
+- [x] `docs/deployment/README.md` — the eight new variables, mode selection, and the disclosure surface
+- [x] `.env.example` — new variables, no real token
+- [x] `CHANGELOG.md` — entry under `[Unreleased]`
+- [x] **two ADRs**: `0001-sql-parser-dependency.md` (with the probe evidence) and `0002-four-state-column-verdicts.md`
+- [x] record the deliberate deviations: the first non-`GET` route, `200 {"state":…}` instead of 400/500/200, and the widened disclosure surface
+- [x] **correct the stale "zero test files" claims** in `PROJECT.md`, `CONTRIBUTING.md`, `docs/deployment/README.md`, `.ai/rules.md` and `ARCHITECTURE.md`
+- [x] add the missing 11th site to `.ai/rules.md` rule 3 (`exportHtml`'s inline `:root`)
+- [x] move this plan to `docs/plans/completed/`
 
-- [ ] `README.md` — the feature, the four verdict states, and the new variables in the `.env` code block (README has no env table)
-- [ ] `CLAUDE.md` — the new pipeline, the config table, the endpoint list, **and the corrected caching story** (rule 8 requires documenting the change)
-- [ ] `ARCHITECTURE.md` — components, data flow, dependencies, diagram
-- [ ] `docs/api/README.md` — the new routes and JSON fields
-- [ ] `docs/deployment/README.md` — the eight new env vars (rule: "Deploy/config changed → `docs/deployment/`")
-- [ ] `.env.example` — new variables, no real token (rule 11)
-- [ ] `CHANGELOG.md` — entry under `[Unreleased]`
-- [ ] **two ADRs in `docs/decisions/`** using `adr-template.md`: (a) adopting the SQL-parser dependency, with the probe results as evidence; (b) the four-state verdict model and the `exact`-confidence requirement
-- [ ] record the deliberate deviations: `POST` on a previously all-`GET` API, `200 {"state":…}` instead of the documented 400/500/200 shape, and the widened disclosure surface (dashboard titles, Grafana URLs, **raw SQL snippets** — more sensitive than schema metadata) on an API that `.ai/rules.md` documents as unauthenticated
-- [ ] **correct the now-stale "zero test files" claims** in `PROJECT.md:103,115,129`, `CONTRIBUTING.md:19,136,147,150`, `docs/deployment/README.md:60,103`, `.ai/rules.md:204-205`, `ARCHITECTURE.md:148` — this branch (`docs/governance-baseline`) exists to make the docs accurate; leaving six stale claims regresses it
-- [ ] add the missing 11th site to `.ai/rules.md` rule 3 (`exportHtml`'s inline `:root`, `app.js:493-494`) — it is absent today whether or not Task 15 ships
-- [ ] move this plan to `docs/plans/completed/`
+**Task 17 notes**
+
+- ➕ `.ai/rules.md` rule 3 also gained the verdict contract (`models/usage.go` →
+  `VERDICT_LABELS`/`VERDICT_TITLES` in `app.js` → `--v-*` tokens and `.verdict-*` classes in
+  `styles.css`), which is the same class of cross-file coupling as the engine strings and would
+  otherwise be rediscovered the hard way.
+- The `README.md` section leads with what the four verdicts license, and names the three deliberate
+  refusals — key columns, Distributed tables, and any state but `ok` — because a reader who
+  over-trusts the report drops a live column.
 
 ## Post-Completion
 

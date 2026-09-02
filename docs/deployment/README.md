@@ -57,7 +57,7 @@ credentials `default` / `default`
   ([`.github/workflows/release.yml`](../../.github/workflows/release.yml),
   [`.github/workflows/docker-publish.yml`](../../.github/workflows/docker-publish.yml)).
   The `test` job's `go test ./...` also proves nothing today: the repository
-  contains zero `*_test.go` files, so the run reports `[no test files]` for every
+  covers `api` and `models`, so the run reports `[no test files]` only for every other
   package.
 - **Artifacts produced:**
   - Container image `ghcr.io/fulgerx2007/clickhouse-schemaflow-visualizer`, tagged
@@ -448,3 +448,46 @@ never read, per known issue 2. The only CI secret in use is the automatic
 `secrets.GITHUB_TOKEN`
 ([`.github/workflows/release.yml`](../../.github/workflows/release.yml),
 [`.github/workflows/docker-publish.yml`](../../.github/workflows/docker-publish.yml)).
+
+
+## Grafana column usage (optional)
+
+Off unless configured. With no `GRAFANA_*` variable the application behaves exactly as it
+did before the feature existed, and the UI renders no part of it.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRAFANA_URL` | (empty) | Grafana base URL. With `GRAFANA_TOKEN`, enables API mode. |
+| `GRAFANA_TOKEN` | (empty) | Service-account token. A **Viewer** role is sufficient. Never logged, never returned by any endpoint. |
+| `GRAFANA_DASHBOARDS_DIR` | (empty) | Directory of dashboard JSON. Enables directory mode with **no credentials**. |
+| `GRAFANA_SKIP_VERIFY` | `false` | Skip TLS verification for the Grafana API. Never make it the default. |
+| `GRAFANA_TIMEOUT` | `30s` | HTTP timeout for API calls. |
+| `GRAFANA_CACHE_TTL` | `15m` | Scan reuse window; also the debounce for `POST /api/grafana/refresh`. |
+| `GRAFANA_DEFAULT_DATABASE` | value of `CLICKHOUSE_DATABASE` | Database assumed for table references that are not schema-qualified. |
+| `GRAFANA_SNIPPET_CHARS` | `200` | Max length of the SQL snippet returned as evidence. `0` omits snippets entirely. |
+
+**Choosing a mode.** `GRAFANA_URL` + `GRAFANA_TOKEN` selects API mode;
+`GRAFANA_DASHBOARDS_DIR` alone selects directory mode and needs no credentials. Set both
+and the API is primary with the directory as a fallback — a fallback that fires is
+reported as `mode: api-fallback-dir` rather than passed off as a healthy API scan.
+
+Directory mode is the right choice when dashboards are provisioned from a repository:
+it needs no network and no secret, and it sees dashboards that exist in the provisioning
+tree but not yet in the instance.
+
+**Deployment notes.**
+
+- The token belongs in the deployment's secret store, not in a committed file. `.env` is
+  gitignored; `.env.example` carries the variable names only.
+- `docker-compose.yml` runs with `network_mode: host`; confirm the Grafana URL resolves
+  from there. In directory mode, mount the dashboard tree into the container.
+- Startup is never blocked by Grafana. A bad token or an unreachable host logs a warning
+  and the application serves normally, reporting the reason through
+  `GET /api/grafana/status`.
+- The scan costs one HTTP request per dashboard in API mode, and exactly **two ClickHouse
+  queries** per rebuild regardless of schema size (`system.columns` and `system.tables`).
+
+**Disclosure surface.** These endpoints expose dashboard titles, panel titles, Grafana
+URLs and, by default, SQL snippets — meaningfully more than schema metadata. The HTTP API
+has no authentication, so do not expose the port publicly. Set `GRAFANA_SNIPPET_CHARS=0`
+to withhold the SQL.

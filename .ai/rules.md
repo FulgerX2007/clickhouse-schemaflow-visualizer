@@ -57,8 +57,19 @@ consumed by:
   `:827-831` for `.rel-table`), the engine chip (`:1066-1070`) and the palette row glyph
   (`:1294-1298`)
 
-Adding, renaming or removing an engine family is a **five-file change in one commit**.
-A node whose engine key has no CSS class renders unstyled with no error.
+- `static/js/app.js` — **`exportHtml()`'s inline `:root` block (`:493-494`) redeclares the
+  five `--t-*-fg` variables independently of both `styles.css` and `commonDiagramCss()`.**
+  It is the site most easily missed: omit it and the live view is correct while the
+  exported HTML renders that family's rail with an undefined variable.
+
+Adding, renaming or removing an engine family is a **five-file change in one commit**,
+across eleven sites. A node whose engine key has no CSS class renders unstyled with no
+error.
+
+The column-usage verdicts (`used`, `unused`, `unknown`, `no-coverage`) are a smaller
+contract of the same kind: `models/usage.go` produces them, `static/js/app.js` maps them
+in `VERDICT_LABELS`/`VERDICT_TITLES`, and `static/css/styles.css` styles them via
+`--v-*` tokens and `.verdict-<name>` classes.
 
 **4. `allowedDatabase()` and `BuildColumnIndex`'s `NOT IN` list change together.**
 `models/clickhouse.go:331-346` excludes `system`, `information_schema`,
@@ -217,9 +228,14 @@ Run the checks locally yourself (see *Testing standards*).
 ## Testing standards
 
 - Test command: `go test ./...`.
-- **There are zero test files in the repository** (`find . -name '*_test.go'` → 0);
-  `go test ./...` passes reporting `[no test files]` for all four packages. Do not
-  claim coverage, a suite, or testing conventions that do not exist.
+- **Coverage is partial.** Six `*_test.go` files cover `api/` and `models/`, all added
+  with the Grafana column-usage feature: table-driven tests, `httptest` for the Grafana
+  API client, and JSON fixtures in `models/testdata/dashboards/`. `main.go` and
+  `config/` have none, and the frontend has no automated coverage at all. Do not claim
+  a suite reaches further than that.
+- `models/grafana_corpus_test.go` is a measurement instrument rather than a fixture
+  test: it skips unless `GRAFANA_DASHBOARDS_DIR` names a real dashboard tree, and fails
+  if the SQL parse rate drops below 70%.
 - Local check sequence before proposing a commit, all of which currently pass:
   `go build -o clickhouse-schemaflow-visualizer .`, `go vet ./...`,
   `golangci-lint run`, `go test ./...`.

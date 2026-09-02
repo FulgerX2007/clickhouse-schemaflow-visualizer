@@ -16,7 +16,7 @@ only for the container workflows below.
 
 ```bash
 go mod download                                    # install Go dependencies (README.md:118)
-go test ./...                                      # currently reports "[no test files]" for all 4 packages
+go test ./...                                      # api + models covered; main + config report "[no test files]"
 ```
 
 Then create a `.env` in the repository root and run the server:
@@ -133,7 +133,7 @@ until a release tag exists, so run these yourself:
 gofmt -l .                                         # formatting: must print nothing new (models/clickhouse.go is already listed)
 go vet ./...                                       # vet: clean today
 golangci-lint run                                  # lint: no repo config, runs with defaults
-go test ./...                                      # tests: currently "[no test files]"
+go test ./...                                      # tests: api + models covered
 go build -o clickhouse-schemaflow-visualizer .     # build (README.md, CLAUDE.md)
 ```
 
@@ -144,10 +144,10 @@ Verified state of each command in this repository at the time of writing:
 | `gofmt -l .` | prints `models/clickhouse.go` | Pre-existing, unrelated to your change. Do not reformat that file as a drive-by; if you edit it, format only what you touch or make the reformat its own commit. |
 | `go vet ./...` | exit 0, no output | |
 | `golangci-lint run` | not run here; with no config it would use the default linters | There is **no `.golangci.yml`** in the repository, so results depend on your locally installed version. TODO: decide whether to check in a `.golangci.yml` so lint output is reproducible. |
-| `go test ./...` | passes, `[no test files]` × 4 packages | **The repository contains zero `*_test.go` files** (`find . -name '*_test.go'` → 0). Passing tests prove nothing here. |
+| `go test ./...` | passes; `api` and `models` covered | Six `*_test.go` files, all from the Grafana column-usage feature. `main` and `config` still have none, so a green run does not mean the whole tree is exercised. |
 | `go build -o clickhouse-schemaflow-visualizer .` | exit 0 | Same command CI runs inside the tag-triggered `test` job (`.github/workflows/release.yml`). |
 
-Because there is no test suite, **manual verification is part of the gate** for any
+Because coverage is partial and the diagram layer has none at all, **manual verification is part of the gate** for any
 behavioural change: bring up the local test stack above, exercise the affected view in
 the browser, and say in the PR what you checked.
 
@@ -220,7 +220,7 @@ Repository-specific notes on those duties:
 - [ ] No secrets, credentials, or generated artifacts committed
 - [ ] `gofmt -l .` reports nothing new beyond the pre-existing `models/clickhouse.go`
 - [ ] Behavioural changes verified by hand against the local test stack, with the steps
-      stated in the PR description (there is no automated test coverage)
+      stated in the PR description (automated coverage does not reach the frontend)
 - [ ] `.env` and any real ClickHouse credentials stay out of the commit (`.gitignore`)
 
 ## Releasing
