@@ -477,10 +477,11 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - ➕ Added beyond the checklist: paging test (a full page forces a second request), a token-leak test
   on the error path, an invalid-uid test, a search-metadata-fallback test (dashboard objects may omit
   their own uid/title/folder), and a `NewDashboardSource` selection test covering all four modes.
-- ⚠️ **Live API validation was not possible**: the configured instance (`https://10.233.1.17/dna/`)
-  answers `dial tcp 10.233.1.17:443: connect: no route to host` from this machine — presumably it is
-  behind a VPN. The API path is therefore covered by `httptest` only, and **Post-Completion still
-  requires a live run**.
+- ✔ **Live API validation completed** against `https://10.233.1.19/dna` with a real service-account
+  token (the address in the grafana-skill config, `…1.17`, is unreachable; `…1.19` is the live one).
+  `apiSource` read **147 dashboards / 636 panels in 4.0s with 0 skipped** — no v2-schema refusals, no
+  failed fetches. Through the real binary: `state=ok mode=api dashboards=147 queries=1051 parsed=964
+  failed=87`. The token appears in **no** response body and **no** log line.
 - ✔ The *fallback* path was validated end-to-end against real configuration: with the real
   (unreachable) `GRAFANA_URL` plus the real dashboards directory, the scan reports
   `mode=api-fallback-dir dashboards=167 skipped=5`, carries a warning naming the connection failure,
@@ -912,6 +913,32 @@ endpoints behave identically, and the process logs nothing about Grafana.
 
 The report found **10 genuinely unused columns** across the seeded schema, with totals
 `used=13 unused=10 unknown=0 no_coverage=12`.
+
+### Live Grafana
+
+Also run against the production instance (`https://10.233.1.19/dna`, service-account token):
+
+| Measure | Live API | Provisioning repo |
+|---|---|---|
+| dashboards | **147** | 167 |
+| panels | 636 | 699 |
+| SQL strings | 1051 | 1177 |
+| parsed by the AST | **964 (91.7%)** | 1089 (92.5%) |
+| exact / heuristic references | 5383 / 888 | 5994 / 964 |
+| skipped dashboards | **0** | 5 (duplicate uids) |
+| scan time | 4.0s | 0.1s |
+
+The two sources agree closely on parse rate, which is the number that matters. **They disagree on
+population: 147 live against 167 in the repo.** The plan's Post-Completion asked for exactly this
+comparison — 20 dashboards exist in the provisioning tree that the live instance does not serve (five
+of them are the duplicate-uid pairs, so the real gap is ~15). Worth resolving before trusting either
+source alone, since a dashboard that exists only in the repo still reads columns, while one that
+exists only live is invisible to a file-mode scan.
+
+⚠️ The production ClickHouse (`clickhouse:9000` from `.env`) is a cluster-internal name and is not
+reachable from a developer machine, so a **real unused-column report against the production schema has
+still not been produced**. That remains the single most valuable outstanding verification, and it
+needs to run somewhere with access to both.
 
 ### Task 13: Inspector — per-column dashboard usage
 
