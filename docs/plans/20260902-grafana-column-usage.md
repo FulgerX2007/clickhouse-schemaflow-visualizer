@@ -845,13 +845,26 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 **Files:**
 - Modify: `api/handlers.go`, `api/handlers_test.go`
 
-- [ ] register `GET /api/grafana/usage/:database/:table`, `GET /api/grafana/unused`, `POST /api/grafana/refresh`
-- [ ] extend `GET /api/grafana/status` with full scan stats and the four-state `state` field
-- [ ] return the documented body for each of `disabled` / `scanning` / `error` / `ok` from **all four** endpoints
-- [ ] validate `:database`/`:table` exactly as the existing handlers do — `400` on empty, per the rule-documented contract
-- [ ] keep `api/` thin (`.ai/rules.md` coding conventions): handlers read params, call `models`, marshal JSON
-- [ ] write handler tests for all four states, unknown-table, refresh-debounced, and refresh-error paths
-- [ ] run tests — must pass before task 13
+- [x] register `GET /api/grafana/usage/:database/:table`, `GET /api/grafana/unused`, `POST /api/grafana/refresh`
+- [x] extend `GET /api/grafana/status` with full scan stats and the four-state `state` field
+- [x] return the documented body for each of `disabled` / `scanning` / `error` / `ok` from **all four** endpoints
+- [x] validate `:database`/`:table` exactly as the existing handlers do — `400` on empty
+- [x] keep `api/` thin: handlers read params, call `models`, marshal JSON
+- [x] write handler tests for all four states, unknown-table, refresh-debounced, and refresh-error paths
+- [x] run tests — must pass before task 13
+
+**Task 12 notes**
+
+- Every Grafana endpoint answers with a top-level `state`, and **a state other than `ok` carries no
+  payload at all**. An empty usage payload and a real one showing nothing read are indistinguishable
+  to a reader, so the envelope refuses to hand over a shape that could be misread.
+- `POST /api/grafana/refresh` is the only non-`GET` route in the API. A test asserts that: it walks
+  the router's route table and fails on any other non-`GET` method, so the next one has to be
+  deliberate.
+- ➕ Test seams (`NewGrafanaIndexForTest`, `NewGrafanaIndexFailingForTest`, `ScanForTest`) live in
+  `models` because the `api` package cannot reach the index's unexported source and loader fields, and
+  building a real one there would need a live ClickHouse and a live Grafana.
+- The route-inventory test now pins all ten routes and separates the six frozen ones from the four new.
 
 ### Task 13: Inspector — per-column dashboard usage
 

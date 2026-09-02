@@ -247,3 +247,39 @@ func (g *GrafanaIndex) recordFailure(err error) {
 	g.state = GrafanaStateError
 	g.failure = err.Error()
 }
+
+// ─── Test seams ──────────────────────────────────────────────────────────────
+//
+// The api package cannot reach the unexported source and loader fields, and
+// building a real index there would need a live ClickHouse and a live Grafana.
+// These constructors exist so the handlers can be tested against a scanned index.
+
+// fixedSource returns a scan that was prepared in advance.
+type fixedSource struct {
+	scan DashboardScan
+	err  error
+}
+
+func (s fixedSource) Dashboards() (DashboardScan, error) {
+	if s.err != nil {
+		return DashboardScan{}, s.err
+	}
+	return s.scan, nil
+}
+
+// NewGrafanaIndexForTest builds an index over a prepared scan and schema.
+func NewGrafanaIndexForTest(config GrafanaConfig, scan DashboardScan, snapshot SchemaSnapshot) *GrafanaIndex {
+	return NewGrafanaIndex(config, fixedSource{scan: scan},
+		func() (SchemaSnapshot, error) { return snapshot, nil }, "")
+}
+
+// NewGrafanaIndexFailingForTest builds an index whose source always fails.
+func NewGrafanaIndexFailingForTest(config GrafanaConfig, err error) *GrafanaIndex {
+	return NewGrafanaIndex(config, fixedSource{err: err},
+		func() (SchemaSnapshot, error) { return SchemaSnapshot{}, nil }, "")
+}
+
+// ScanForTest runs one scan synchronously.
+func (g *GrafanaIndex) ScanForTest() error {
+	return g.scan()
+}

@@ -35,7 +35,27 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 		api.GET("/relationships/:database/:table", h.GetRelationshipsGraph)
 		api.GET("/table/:database/:table", h.GetTableDetails)
 		api.GET("/grafana/status", h.GetGrafanaStatus)
+		api.GET("/grafana/usage/:database/:table", h.GetGrafanaUsage)
+		api.GET("/grafana/unused", h.GetGrafanaUnusedReport)
+		api.POST("/grafana/refresh", h.RefreshGrafana)
 	}
+}
+
+// grafanaReady writes the status envelope and reports false when dashboard usage
+// is not available.
+//
+// Every Grafana endpoint answers with a top-level "state", so the frontend has
+// one branch rather than four. A state other than "ok" carries no payload at
+// all: an empty usage payload and a real one showing nothing read are
+// indistinguishable to a reader, and the difference between them is the
+// difference between a safe schema change and a broken dashboard.
+func (h *Handler) grafanaReady(c *gin.Context) bool {
+	status := h.grafana.Status()
+	if status.State == models.GrafanaStateOK {
+		return true
+	}
+	c.JSON(http.StatusOK, status)
+	return false
 }
 
 // GetGrafanaStatus reports whether dashboard-usage data is available and, when it
@@ -48,6 +68,54 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 // integration does not look like a server fault.
 func (h *Handler) GetGrafanaStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.grafana.Status())
+}
+
+// GetGrafanaUsage returns one table's column verdicts and the dashboards behind
+// them, for the inspector panel.
+func (h *Handler) GetGrafanaUsage(c *gin.Context) {
+	database := c.Param("database")
+	table := c.Param("table")
+
+	if database == "" || table == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+		return
+	}
+	if !h.grafanaReady(c) {
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"state": models.GrafanaStateOK,
+		"usage": h.grafana.Usage(database + "." + table),
+	})
+}
+
+// GetGrafanaUnusedReport returns column verdicts across the whole schema.
+// Filters narrow it by database and by verdict.
+func (h *Handler) GetGrafanaUnusedReport(c *gin.Context) {
+	if !h.grafanaReady(c) {
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"state": models.GrafanaStateOK,
+		"report": h.grafana.Report(models.UnusedReportFilters{
+			Database: c.Query("database"),
+			Verdict:  c.Query("verdict"),
+		}),
+	})
+}
+
+// RefreshGrafana re-scans the dashboard source.
+//
+// The only non-GET route in the API. It writes nothing to ClickHouse — it
+// rebuilds an in-process cache — but it does cost one request per dashboard
+// against Grafana, so it is debounced by GRAFANA_CACHE_TTL and reports when a
+// call was turned away.
+func (h *Handler) RefreshGrafana(c *gin.Context) {
+	status, debounced := h.grafana.Refresh()
+	status.Debounced = debounced
+	c.JSON(http.StatusOK, status)
 }
 
 // GetConnection returns the host, port, and TLS mode the server is connected
