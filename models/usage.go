@@ -622,16 +622,19 @@ const (
 	ReasonViaLineage         = "read-through-lineage"
 )
 
-// virtualEngines hold no data of their own. A Distributed table routes reads to
-// shards, a Merge table fans a read across sibling tables, and a materialized
-// view is a trigger over its source — none of them store a column you could
-// drop. ALTER TABLE … DROP COLUMN on one either fails or edits a routing
-// definition, so the question always belongs to the tables underneath.
+// virtualEngines name tables whose columns are not a thing you can drop. A
+// Distributed table routes reads to shards, a Merge table fans a read across
+// sibling tables, a materialized view is a trigger over its source, and a
+// dictionary's columns are declared in its own DDL rather than stored as table
+// columns. ALTER TABLE … DROP COLUMN on any of them either fails outright or
+// edits a definition rather than data, so the question always belongs
+// elsewhere — to the tables underneath, or to the dictionary's own statement.
 var virtualEngines = map[string]string{
 	"Distributed":      ReasonDistributed,
 	"Merge":            "merge-table-judge-the-underlying-tables",
 	"MaterializedView": "materialized-view-judge-its-source-and-destination",
 	"View":             "view-judge-the-tables-it-reads",
+	"Dictionary":       "dictionary-columns-are-declared-in-its-ddl-not-droppable",
 }
 
 // ReasonDistributed is kept as a named constant because tests and callers refer
@@ -824,18 +827,20 @@ type UnusedReport struct {
 
 // BuildUnusedReport walks every table and collects column verdicts.
 //
-// Tables whose engine stores nothing — Distributed, Merge, MaterializedView,
-// View — are skipped entirely: a column of one is never the thing you drop.
+// Tables whose columns are not droppable — Distributed, Merge, MaterializedView,
+// View and Dictionary — are skipped entirely.
 // Rows come out ordered by database, table and column position, so the report is
 // stable between refreshes.
 func BuildUnusedReport(snapshot SchemaSnapshot, index UsageIndex, state GrafanaState, filters UnusedReportFilters) UnusedReport {
 	report := UnusedReport{Rows: []UnusedReportRow{}}
 
+	skipped := 0
 	for _, table := range snapshot.Tables() {
-		// Engines that store nothing never reach the report: a column of one is
-		// not the thing you drop, and listing it would send a reader to alter a
-		// routing definition instead of a table.
+		// Engines whose columns are not droppable never reach the report: listing
+		// one would send a reader to alter a routing definition, or a dictionary
+		// statement, instead of a table.
 		if virtualEngineReason(snapshot.Engines[table]) != "" {
+			skipped++
 			continue
 		}
 
@@ -873,14 +878,22 @@ func BuildUnusedReport(snapshot SchemaSnapshot, index UsageIndex, state GrafanaS
 		}
 	}
 
-	report.Caveats = reportCaveats(index, state)
+	report.Caveats = reportCaveats(index, state, skipped)
 	return report
 }
 
 // reportCaveats states plainly what the report cannot see.
-func reportCaveats(index UsageIndex, state GrafanaState) []string {
+func reportCaveats(index UsageIndex, state GrafanaState, skipped int) []string {
 	caveats := []string{
 		"Reflects Grafana dashboards only. Ad-hoc queries, applications and scheduled jobs are invisible to it.",
+	}
+	if skipped > 0 {
+		// The totals below count judgeable columns, not the whole schema, and a
+		// reader comparing them against system.columns deserves to know why.
+		caveats = append(caveats, fmt.Sprintf(
+			"%d table(s) are excluded because their columns cannot be dropped — Distributed, Merge, "+
+				"MaterializedView, View and Dictionary. Counts below cover the remaining tables only.",
+			skipped))
 	}
 	if state != GrafanaStateOK {
 		caveats = append(caveats,

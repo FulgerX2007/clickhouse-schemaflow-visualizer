@@ -811,6 +811,7 @@ func TestVirtualEnginesAreNeverJudged(t *testing.T) {
 		"db.merge": "Merge",
 		"db.mv":    "MaterializedView",
 		"db.view":  "View",
+		"db.dict":  "Dictionary",
 		"db.real":  "MergeTree",
 	}
 	columns := map[string][]ColumnInfo{}
@@ -859,5 +860,10 @@ func TestVirtualEnginesAreNeverJudged(t *testing.T) {
 		if engine := engines[row.Database+"."+row.Table]; engine != "MergeTree" {
 			t.Errorf("a %s table reached the report: %s.%s", engine, row.Database, row.Table)
 		}
+	}
+	// The totals then describe judgeable columns, not the whole schema, so the
+	// report has to say how many tables it left out.
+	if !containsMatch(report.Caveats, "cannot be dropped") {
+		t.Errorf("caveats = %v, want the excluded tables declared", report.Caveats)
 	}
 }

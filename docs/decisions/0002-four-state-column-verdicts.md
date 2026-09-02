@@ -35,8 +35,12 @@ Four verdicts, of which exactly one licenses a drop.
 
 Reaching `unused` additionally requires that the column is not part of a primary,
 sorting or partition key — `ALTER TABLE … DROP COLUMN` refuses those, so reporting one
-would be recommending an impossible change — and that the table is not a `Distributed`
-wrapper, which stores nothing of its own.
+would be recommending an impossible change — and that the table's columns are droppable
+at all. `Distributed`, `Merge`, `MaterializedView`, `View` and `Dictionary` tables are
+excluded entirely: the first four store nothing of their own, and a dictionary's columns
+are declared in its DDL rather than stored as table columns. `ALTER TABLE … DROP COLUMN`
+on any of them either fails or edits a definition rather than data, so the report's totals
+describe judgeable columns and say how many tables they leave out.
 
 **When the dashboard scan has not completed, every column is `no-coverage`.** A Grafana
 that is off, scanning or unreachable produces exactly the evidence of a Grafana in which

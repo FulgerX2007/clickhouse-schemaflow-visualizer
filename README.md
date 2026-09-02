@@ -165,10 +165,11 @@ Columns get one of four verdicts, and **only one of them means safe to drop**:
 | `no-coverage` | nothing observed reads the table at all — which is not evidence its columns are dead | no |
 
 Three deliberate refusals: a key column is never reported unused, because
-`ALTER TABLE … DROP COLUMN` refuses to remove one; a `Distributed` table's columns are
-never reported unused, because it stores nothing of its own; and if Grafana is switched
-off, still scanning or unreachable, **every** column reads `no-coverage` rather than
-`unused` — an absent scan looks exactly like a Grafana in which nothing is used.
+`ALTER TABLE … DROP COLUMN` refuses to remove one; tables whose columns are not droppable
+at all — `Distributed`, `Merge`, `MaterializedView`, `View` and `Dictionary` — are left out
+entirely, since the question belongs to the tables underneath them; and if Grafana is
+switched off, still scanning or unreachable, **every** column reads `no-coverage` rather
+than `unused` — an absent scan looks exactly like a Grafana in which nothing is used.
 
 `unused` also means *unused by Grafana*. Ad-hoc queries, applications and scheduled jobs
 are invisible to it, and the report says so in its own caveats. Cross-check before
