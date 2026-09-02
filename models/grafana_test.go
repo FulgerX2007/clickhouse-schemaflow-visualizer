@@ -308,8 +308,8 @@ func TestDirSourceReadsFixtures(t *testing.T) {
 	if scan.Skipped != 0 {
 		t.Errorf("Skipped = %d, want 0 (warnings: %v)", scan.Skipped, scan.Warnings)
 	}
-	if len(scan.Dashboards) != 2 {
-		t.Fatalf("got %d dashboards, want 2", len(scan.Dashboards))
+	if want := fixtureCount(t); len(scan.Dashboards) != want {
+		t.Fatalf("got %d dashboards, want %d", len(scan.Dashboards), want)
 	}
 
 	byUID := map[string]Dashboard{}
@@ -871,14 +871,15 @@ func TestFallbackSourceUsesDirectoryWhenAPIFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the directory should have rescued the scan: %v", err)
 	}
-	if len(scan.Dashboards) != 2 {
-		t.Errorf("got %d dashboards, want the 2 fixtures", len(scan.Dashboards))
+	if want := fixtureCount(t); len(scan.Dashboards) != want {
+		t.Errorf("got %d dashboards, want the %d fixtures", len(scan.Dashboards), want)
 	}
 	// The fallback must be visible, not passed off as a normal API scan.
 	if scan.Mode != GrafanaModeAPIFallbackDir {
 		t.Errorf("Mode = %q, want %q", scan.Mode, GrafanaModeAPIFallbackDir)
 	}
-	if len(scan.Warnings) == 0 || !strings.Contains(scan.Warnings[0], "grafana api unavailable") {
+	// Content warnings from the fixtures may precede it, so look at all of them.
+	if !containsMatch(scan.Warnings, "grafana api unavailable") {
 		t.Errorf("warnings = %v, want one explaining the fallback", scan.Warnings)
 	}
 	// A fallback is not a lost dashboard.
@@ -954,5 +955,257 @@ func TestNewDashboardSourceSelection(t *testing.T) {
 				t.Errorf("source type = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// ─── Panel and variable extraction ───────────────────────────────────────────
+
+// fixtureCount counts the checked-in dashboard fixtures, so tests that scan the
+// whole directory keep working as fixtures are added.
+func fixtureCount(t *testing.T) int {
+	t.Helper()
+
+	entries, err := filepath.Glob("testdata/dashboards/*.json")
+	if err != nil {
+		t.Fatalf("glob fixtures: %v", err)
+	}
+	return len(entries)
+}
+
+// containsMatch reports whether any entry contains the substring.
+func containsMatch(values []string, substring string) bool {
+	for _, value := range values {
+		if strings.Contains(value, substring) {
+			return true
+		}
+	}
+	return false
+}
+
+// loadFixture reads one checked-in fixture through the directory source.
+func loadFixture(t *testing.T, name string) (Dashboard, []string) {
+	t.Helper()
+
+	dashboard, warnings, err := newDirSource("testdata/dashboards", "").load("testdata/dashboards/" + name)
+	if err != nil {
+		t.Fatalf("load %s: %v", name, err)
+	}
+	return dashboard, warnings
+}
+
+func panelByID(t *testing.T, dashboard Dashboard, id int) Panel {
+	t.Helper()
+
+	for _, panel := range dashboard.Panels {
+		if panel.ID == id {
+			return panel
+		}
+	}
+	t.Fatalf("panel %d not found in %q", id, dashboard.UID)
+	return Panel{}
+}
+
+func TestExtractPanelsDescendsIntoRows(t *testing.T) {
+	dashboard, _ := loadFixture(t, "panel_shapes.json")
+
+	// The row itself is a container, not a panel with queries.
+	for _, panel := range dashboard.Panels {
+		if panel.Type == "row" {
+			t.Errorf("row panel %d was kept as a panel", panel.ID)
+		}
+	}
+
+	nested := panelByID(t, dashboard, 2)
+	if len(nested.Queries) != 1 || !strings.Contains(nested.Queries[0], "nested_col") {
+		t.Errorf("collapsed-row panel queries = %v, want the nested SQL", nested.Queries)
+	}
+}
+
+func TestExtractPanelsInheritsDatasourceAndKeepsHiddenTargets(t *testing.T) {
+	dashboard, _ := loadFixture(t, "panel_shapes.json")
+
+	panel := panelByID(t, dashboard, 3)
+	if len(panel.Queries) != 2 {
+		t.Fatalf("got %d queries, want 2 (a hidden target still names columns someone relies on)", len(panel.Queries))
+	}
+	if !strings.Contains(panel.Queries[0], "inherited_col") || !strings.Contains(panel.Queries[1], "second_col") {
+		t.Errorf("queries = %v, want both targets", panel.Queries)
+	}
+}
+
+func TestExtractPanelsResolvesDashboardReference(t *testing.T) {
+	dashboard, warnings := loadFixture(t, "panel_shapes.json")
+
+	// Panel 4 reuses panel 3's data, so it really does display those columns.
+	reuse := panelByID(t, dashboard, 4)
+	if reuse.RefPanelID != 3 {
+		t.Errorf("RefPanelID = %d, want 3", reuse.RefPanelID)
+	}
+	if len(reuse.Queries) != 2 {
+		t.Errorf("got %d queries, want panel 3's 2 queries copied", len(reuse.Queries))
+	}
+
+	// Panel 5 points at a panel that is not here: that must be reported, not
+	// quietly treated as a panel that uses nothing.
+	dangling := panelByID(t, dashboard, 5)
+	if len(dangling.Queries) != 0 {
+		t.Errorf("dangling reference produced queries: %v", dangling.Queries)
+	}
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "panel 5 reuses panel 999") {
+		t.Errorf("warnings = %v, want the dangling reference named", warnings)
+	}
+}
+
+func TestExtractPanelsFiltersDatasources(t *testing.T) {
+	dashboard, _ := loadFixture(t, "panel_shapes.json")
+
+	tests := []struct {
+		name string
+		id   int
+		want string // substring the single query must contain, "" for no queries
+	}{
+		{name: "infinity is not SQL", id: 6, want: ""},
+		{name: "postgres is a different database", id: 7, want: ""},
+		{name: "legacy string datasource is kept", id: 8, want: "legacy_col"},
+		{name: "unknown datasource with SQL is kept", id: 9, want: "orphan_col"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panel := panelByID(t, dashboard, tt.id)
+			if tt.want == "" {
+				if len(panel.Queries) != 0 {
+					t.Errorf("queries = %v, want none", panel.Queries)
+				}
+				return
+			}
+			// Unrecognised datasources are kept: excluding a real query would make
+			// its columns look unused, which is the error that costs a schema.
+			if len(panel.Queries) != 1 || !strings.Contains(panel.Queries[0], tt.want) {
+				t.Errorf("queries = %v, want one containing %q", panel.Queries, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractVariables(t *testing.T) {
+	dashboard, _ := loadFixture(t, "panel_shapes.json")
+
+	byName := map[string]TemplateVariable{}
+	for _, variable := range dashboard.Variables {
+		byName[variable.Name] = variable
+	}
+
+	// An unnamed variable is dropped.
+	if len(byName) != 5 {
+		t.Fatalf("got %d variables, want 5: %v", len(byName), byName)
+	}
+
+	// String query form, with values from options and current.
+	period := byName["period"]
+	if period.Query != "SELECT DISTINCT period FROM meta.periods" {
+		t.Errorf("period.Query = %q", period.Query)
+	}
+	if got := strings.Join(period.Values, ","); got != "6min,1h" {
+		t.Errorf("period.Values = %v, want 6min and 1h deduped", period.Values)
+	}
+
+	// Object query form, with a multi-value current.
+	object := byName["objectquery"]
+	if object.Query != "SELECT name FROM meta.hosts" {
+		t.Errorf("objectquery.Query = %q, want the object's query field", object.Query)
+	}
+	if len(object.Values) != 2 || object.Values[0] != "a" || object.Values[1] != "b" {
+		t.Errorf("objectquery.Values = %v, want a and b", object.Values)
+	}
+
+	// A custom variable's query is a value list, not SQL.
+	region := byName["region"]
+	if region.Query != "" {
+		t.Errorf("region.Query = %q, want empty for a custom variable", region.Query)
+	}
+	if got := strings.Join(region.Values, ","); got != "eu,us,apac" {
+		t.Errorf("region.Values = %v, want the comma list trimmed", region.Values)
+	}
+
+	if got := strings.Join(byName["step"].Values, ","); got != "1m,5m" {
+		t.Errorf("step.Values = %v", byName["step"].Values)
+	}
+
+	// $__all is Grafana's own sentinel, never a real table-name fragment.
+	for _, value := range byName["everything"].Values {
+		if value == "$__all" {
+			t.Errorf("everything.Values kept the $__all sentinel: %v", byName["everything"].Values)
+		}
+	}
+}
+
+func TestExtractContentOnTheOtherFixtures(t *testing.T) {
+	simple, warnings := loadFixture(t, "simple.json")
+	if len(warnings) != 0 {
+		t.Errorf("simple.json warnings = %v, want none", warnings)
+	}
+	if len(simple.Panels) != 2 {
+		t.Fatalf("got %d panels, want 2", len(simple.Panels))
+	}
+
+	traffic, _ := loadFixture(t, "rows_and_vars.json")
+	nested := panelByID(t, traffic, 11)
+	// The ${period} table name survives extraction untouched; expanding it is
+	// Task 5's job.
+	if len(nested.Queries) != 1 || !strings.Contains(nested.Queries[0], "agg_${period}_distributed") {
+		t.Errorf("queries = %v, want the ${period} table name preserved", nested.Queries)
+	}
+	if reuse := panelByID(t, traffic, 12); len(reuse.Queries) != 1 {
+		t.Errorf("panel 12 queries = %v, want panel 11's query copied", reuse.Queries)
+	}
+	if infinity := panelByID(t, traffic, 13); len(infinity.Queries) != 0 {
+		t.Errorf("infinity panel queries = %v, want none", infinity.Queries)
+	}
+}
+
+func TestParseDatasourceRef(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want datasourceRef
+	}{
+		{name: "object", raw: `{"type":"grafana-clickhouse-datasource","uid":"ch"}`, want: datasourceRef{Type: "grafana-clickhouse-datasource", UID: "ch"}},
+		{name: "dashboard reference", raw: `{"type":"datasource","uid":"-- Dashboard --"}`, want: datasourceRef{Type: "datasource", UID: "-- Dashboard --"}},
+		{name: "legacy string", raw: `"ClickHouse"`, want: datasourceRef{UID: "ClickHouse"}},
+		{name: "null", raw: `null`, want: datasourceRef{}},
+		{name: "absent", raw: ``, want: datasourceRef{}},
+		{name: "number is nonsense", raw: `7`, want: datasourceRef{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseDatasourceRef(json.RawMessage(tt.raw))
+			if got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A chain of reuse targets must not recurse.
+func TestExtractPanelsChainedReferenceDoesNotRecurse(t *testing.T) {
+	raw := rawDashboard{Panels: []rawPanel{
+		{ID: 1, Type: "stat", Datasource: json.RawMessage(`{"type":"datasource","uid":"-- Dashboard --"}`),
+			Targets: []rawTarget{{PanelID: 2}}},
+		{ID: 2, Type: "stat", Datasource: json.RawMessage(`{"type":"datasource","uid":"-- Dashboard --"}`),
+			Targets: []rawTarget{{PanelID: 1}}},
+	}}
+
+	panels, _, warnings := extractContent(raw)
+
+	for _, panel := range panels {
+		if len(panel.Queries) != 0 {
+			t.Errorf("panel %d produced queries from a reference chain: %v", panel.ID, panel.Queries)
+		}
+	}
+	if len(warnings) != 2 {
+		t.Errorf("warnings = %v, want both chained references reported", warnings)
 	}
 }

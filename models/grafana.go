@@ -327,11 +327,45 @@ type dashboardEnvelope struct {
 	} `json:"meta"`
 }
 
-// rawDashboard is the subset of the dashboard object this pass reads. The panel
-// and templating payloads are decoded by the extraction pass.
+// rawDashboard is the subset of the dashboard object this pass reads.
 type rawDashboard struct {
-	UID   string `json:"uid"`
-	Title string `json:"title"`
+	UID        string     `json:"uid"`
+	Title      string     `json:"title"`
+	Panels     []rawPanel `json:"panels"`
+	Templating struct {
+		List []rawVariable `json:"list"`
+	} `json:"templating"`
+}
+
+// rawPanel is one panel. Panels nests the children of a collapsed row, which a
+// flat walk over the top-level list would silently miss.
+type rawPanel struct {
+	ID         int             `json:"id"`
+	Type       string          `json:"type"`
+	Title      string          `json:"title"`
+	Datasource json.RawMessage `json:"datasource"`
+	Targets    []rawTarget     `json:"targets"`
+	Panels     []rawPanel      `json:"panels"`
+}
+
+// rawTarget is one query on a panel. PanelID is set only on targets that reuse
+// another panel's data; Grafana panel ids start at 1, so 0 means absent.
+type rawTarget struct {
+	RefID      string          `json:"refId"`
+	Datasource json.RawMessage `json:"datasource"`
+	RawSQL     string          `json:"rawSql"`
+	PanelID    int             `json:"panelId"`
+}
+
+// rawVariable is one templating entry.
+type rawVariable struct {
+	Name    string          `json:"name"`
+	Type    string          `json:"type"`
+	Query   json.RawMessage `json:"query"`
+	Current json.RawMessage `json:"current"`
+	Options []struct {
+		Value json.RawMessage `json:"value"`
+	} `json:"options"`
 }
 
 // dirSource reads dashboards from a directory tree of JSON files. It needs no
@@ -375,7 +409,7 @@ func (s dirSource) Dashboards() (DashboardScan, error) {
 			return nil
 		}
 
-		dashboard, loadErr := s.load(path)
+		dashboard, contentWarnings, loadErr := s.load(path)
 		if loadErr != nil {
 			scan = scan.withSkip("%s: %v", path, loadErr)
 			return nil
@@ -385,6 +419,9 @@ func (s dirSource) Dashboards() (DashboardScan, error) {
 			return nil
 		}
 
+		for _, warning := range contentWarnings {
+			scan = scan.withWarning("%s: %s", dashboard.UID, warning)
+		}
 		seen[dashboard.UID] = path
 		scan.Dashboards = append(scan.Dashboards, dashboard)
 		return nil
@@ -396,16 +433,17 @@ func (s dirSource) Dashboards() (DashboardScan, error) {
 	return scan, nil
 }
 
-// load reads one dashboard file in either envelope shape.
-func (s dirSource) load(path string) (Dashboard, error) {
+// load reads one dashboard file in either envelope shape, returning any
+// extraction warnings alongside it.
+func (s dirSource) load(path string) (Dashboard, []string, error) {
 	content, err := os.ReadFile(path) //nolint:gosec // operator-configured dashboard directory
 	if err != nil {
-		return Dashboard{}, err
+		return Dashboard{}, nil, err
 	}
 
 	envelope := dashboardEnvelope{}
 	if err := json.Unmarshal(content, &envelope); err != nil {
-		return Dashboard{}, fmt.Errorf("not valid JSON: %w", err)
+		return Dashboard{}, nil, fmt.Errorf("not valid JSON: %w", err)
 	}
 
 	body := envelope.Dashboard
@@ -415,7 +453,7 @@ func (s dirSource) load(path string) (Dashboard, error) {
 
 	raw := rawDashboard{}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return Dashboard{}, fmt.Errorf("not a dashboard object: %w", err)
+		return Dashboard{}, nil, fmt.Errorf("not a dashboard object: %w", err)
 	}
 
 	folder := envelope.Meta.FolderTitle
@@ -426,7 +464,15 @@ func (s dirSource) load(path string) (Dashboard, error) {
 		}
 	}
 
-	return newDashboard(raw.UID, raw.Title, folder, "dir", s.baseURL)
+	dashboard, err := newDashboard(raw.UID, raw.Title, folder, "dir", s.baseURL)
+	if err != nil {
+		return Dashboard{}, nil, err
+	}
+
+	panels, variables, warnings := extractContent(raw)
+	dashboard.Panels = panels
+	dashboard.Variables = variables
+	return dashboard, warnings, nil
 }
 
 // ─── Grafana HTTP API source ─────────────────────────────────────────────────
@@ -489,10 +535,13 @@ func (s apiSource) Dashboards() (DashboardScan, error) {
 	}
 
 	for _, hit := range hits {
-		dashboard, dashErr := s.dashboard(hit)
+		dashboard, contentWarnings, dashErr := s.dashboard(hit)
 		if dashErr != nil {
 			scan = scan.withSkip("dashboard %q: %v", hit.UID, dashErr)
 			continue
+		}
+		for _, warning := range contentWarnings {
+			scan = scan.withWarning("%s: %s", dashboard.UID, warning)
 		}
 		scan.Dashboards = append(scan.Dashboards, dashboard)
 	}
@@ -534,9 +583,9 @@ func (s apiSource) search() ([]searchHit, error) {
 }
 
 // dashboard fetches one dashboard and reduces it to the envelope.
-func (s apiSource) dashboard(hit searchHit) (Dashboard, error) {
+func (s apiSource) dashboard(hit searchHit) (Dashboard, []string, error) {
 	if !grafanaUIDPattern.MatchString(hit.UID) {
-		return Dashboard{}, fmt.Errorf("search returned an invalid uid %q", hit.UID)
+		return Dashboard{}, nil, fmt.Errorf("search returned an invalid uid %q", hit.UID)
 	}
 
 	body, err := s.get("/api/dashboards/uid/" + hit.UID)
@@ -544,22 +593,22 @@ func (s apiSource) dashboard(hit searchHit) (Dashboard, error) {
 		if isV2SchemaRefusal(body) {
 			// Grafana cannot convert these for us, and guessing at the v2 shape
 			// would be worse than declaring the gap.
-			return Dashboard{}, fmt.Errorf("v2-schema dashboard, not readable through the classic API")
+			return Dashboard{}, nil, fmt.Errorf("v2-schema dashboard, not readable through the classic API")
 		}
-		return Dashboard{}, err
+		return Dashboard{}, nil, err
 	}
 
 	envelope := dashboardEnvelope{}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return Dashboard{}, fmt.Errorf("not valid JSON: %w", err)
+		return Dashboard{}, nil, fmt.Errorf("not valid JSON: %w", err)
 	}
 	if len(envelope.Dashboard) == 0 {
-		return Dashboard{}, fmt.Errorf("response carried no dashboard object")
+		return Dashboard{}, nil, fmt.Errorf("response carried no dashboard object")
 	}
 
 	raw := rawDashboard{}
 	if err := json.Unmarshal(envelope.Dashboard, &raw); err != nil {
-		return Dashboard{}, fmt.Errorf("not a dashboard object: %w", err)
+		return Dashboard{}, nil, fmt.Errorf("not a dashboard object: %w", err)
 	}
 
 	// The search hit is the fallback for both, since a dashboard object may omit
@@ -577,7 +626,15 @@ func (s apiSource) dashboard(hit searchHit) (Dashboard, error) {
 		folder = hit.FolderTitle
 	}
 
-	return newDashboard(uid, title, folder, "api", s.baseURL)
+	dashboard, err := newDashboard(uid, title, folder, "api", s.baseURL)
+	if err != nil {
+		return Dashboard{}, nil, err
+	}
+
+	panels, variables, warnings := extractContent(raw)
+	dashboard.Panels = panels
+	dashboard.Variables = variables
+	return dashboard, warnings, nil
 }
 
 // get performs an authenticated GET. The body is returned even on a non-200 so
@@ -677,4 +734,302 @@ func NewDashboardSource(cfg GrafanaConfig) (DashboardSource, error) {
 	default:
 		return nil, fmt.Errorf("no grafana dashboard source is configured")
 	}
+}
+
+// ─── Panel and variable extraction ───────────────────────────────────────────
+
+// dashboardDatasourceUID marks a target that reuses another panel's data.
+const dashboardDatasourceUID = "-- Dashboard --"
+
+// nonSQLDatasources are datasource types that never carry ClickHouse SQL.
+//
+// The filter is a denylist rather than an allowlist of
+// grafana-clickhouse-datasource, and the asymmetry is deliberate: wrongly
+// excluding a query makes the columns it reads look unused, which is the one
+// error this feature must not make, while wrongly including one only invents
+// usage that keeps a column alive. Anything unrecognised that carries rawSql is
+// therefore kept.
+var nonSQLDatasources = map[string]bool{
+	"yesoreyeram-infinity-datasource": true,
+	"prometheus":                      true,
+	"loki":                            true,
+	"elasticsearch":                   true,
+	"influxdb":                        true,
+	"graphite":                        true,
+	"jaeger":                          true,
+	"tempo":                           true,
+	"testdata":                        true,
+	"grafana-testdata-datasource":     true,
+	"grafana":                         true,
+	// Other SQL dialects: their rawSql would resolve against same-named tables
+	// and invent usage in a different database entirely.
+	"postgres":                      true,
+	"mysql":                         true,
+	"mssql":                         true,
+	"grafana-postgresql-datasource": true,
+	"grafana-mysql-datasource":      true,
+}
+
+// datasourceRef is a panel or target datasource in either the modern object form
+// or the legacy bare-string form.
+type datasourceRef struct {
+	Type string
+	UID  string
+}
+
+func parseDatasourceRef(raw json.RawMessage) datasourceRef {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return datasourceRef{}
+	}
+
+	object := struct {
+		Type string `json:"type"`
+		UID  string `json:"uid"`
+	}{}
+	if err := json.Unmarshal(raw, &object); err == nil {
+		return datasourceRef{Type: object.Type, UID: object.UID}
+	}
+
+	// Legacy dashboards name the datasource directly.
+	name := ""
+	if err := json.Unmarshal(raw, &name); err == nil {
+		return datasourceRef{UID: name}
+	}
+	return datasourceRef{}
+}
+
+func (d datasourceRef) isDashboardReference() bool {
+	return d.UID == dashboardDatasourceUID
+}
+
+func (d datasourceRef) carriesSQL() bool {
+	return !nonSQLDatasources[d.Type]
+}
+
+// flattenPanels walks the panel tree. A row is a container, not a panel with
+// queries, so it contributes only its children.
+func flattenPanels(panels []rawPanel) []rawPanel {
+	flat := []rawPanel{}
+	for _, panel := range panels {
+		if panel.Type != "row" {
+			flat = append(flat, panel)
+		}
+		if len(panel.Panels) > 0 {
+			flat = append(flat, flattenPanels(panel.Panels)...)
+		}
+	}
+	return flat
+}
+
+// extractContent pulls the queries and variables out of a decoded dashboard.
+// The warnings it returns name panels whose data source could not be resolved,
+// so those become "unknown" downstream rather than silently contributing no
+// usage at all.
+func extractContent(raw rawDashboard) ([]Panel, []TemplateVariable, []string) {
+	flat := flattenPanels(raw.Panels)
+
+	byID := make(map[int]rawPanel, len(flat))
+	for _, panel := range flat {
+		byID[panel.ID] = panel
+	}
+
+	panels := []Panel{}
+	warnings := []string{}
+
+	for _, raw := range flat {
+		panel := Panel{ID: raw.ID, Title: raw.Title, Type: raw.Type}
+
+		for _, target := range raw.Targets {
+			source := parseDatasourceRef(target.Datasource)
+			if source == (datasourceRef{}) {
+				// A target without its own datasource inherits the panel's.
+				source = parseDatasourceRef(raw.Datasource)
+			}
+
+			if source.isDashboardReference() {
+				panel.RefPanelID = target.PanelID
+				referenced, ok := byID[target.PanelID]
+				if !ok {
+					warnings = append(warnings, fmt.Sprintf(
+						"panel %d reuses panel %d, which is not in this dashboard", raw.ID, target.PanelID))
+					continue
+				}
+				// The referenced panel's queries are this panel's queries too: it
+				// really does display those columns.
+				queries := panelQueries(referenced)
+				if len(queries) == 0 {
+					warnings = append(warnings, fmt.Sprintf(
+						"panel %d reuses panel %d, which has no readable query", raw.ID, target.PanelID))
+				}
+				panel.Queries = append(panel.Queries, queries...)
+				continue
+			}
+
+			if sql := targetSQL(source, target); sql != "" {
+				panel.Queries = append(panel.Queries, sql)
+			}
+		}
+
+		panels = append(panels, panel)
+	}
+
+	return panels, extractVariables(raw.Templating.List), warnings
+}
+
+// panelQueries returns a panel's own SQL, ignoring any reuse targets so a chain
+// of references cannot recurse.
+func panelQueries(panel rawPanel) []string {
+	queries := []string{}
+	for _, target := range panel.Targets {
+		source := parseDatasourceRef(target.Datasource)
+		if source == (datasourceRef{}) {
+			source = parseDatasourceRef(panel.Datasource)
+		}
+		if source.isDashboardReference() {
+			continue
+		}
+		if sql := targetSQL(source, target); sql != "" {
+			queries = append(queries, sql)
+		}
+	}
+	return queries
+}
+
+// targetSQL returns the target's SQL when its datasource could plausibly be the
+// ClickHouse this app is connected to. Hidden targets are included: a hidden
+// query still names the columns someone relies on.
+func targetSQL(source datasourceRef, target rawTarget) string {
+	sql := strings.TrimSpace(target.RawSQL)
+	if sql == "" || !source.carriesSQL() {
+		return ""
+	}
+	return sql
+}
+
+// listValueTypes hold a comma-separated value list in their query field rather
+// than a query.
+var listValueTypes = map[string]bool{"custom": true, "interval": true}
+
+// extractVariables reduces the templating list to names, SQL and known values.
+// Values are what make ${var} inside a table name resolvable, which is the
+// single largest source of false "unused" verdicts if it is missed.
+func extractVariables(raw []rawVariable) []TemplateVariable {
+	variables := []TemplateVariable{}
+
+	for _, entry := range raw {
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			continue
+		}
+
+		variable := TemplateVariable{Name: name}
+		query := decodeVariableQuery(entry.Query)
+
+		switch {
+		case listValueTypes[entry.Type]:
+			variable.Values = splitCommaList(query)
+		case entry.Type == "query" || (entry.Type == "" && looksLikeSQL(query)):
+			variable.Query = query
+		}
+
+		for _, option := range entry.Options {
+			variable.Values = append(variable.Values, decodeStringOrList(option.Value)...)
+		}
+		variable.Values = append(variable.Values, decodeCurrentValue(entry.Current)...)
+		variable.Values = dedupeNonEmpty(variable.Values)
+
+		variables = append(variables, variable)
+	}
+
+	return variables
+}
+
+// decodeVariableQuery handles both the bare-string form and the object form
+// ({"query": "…"}) that newer datasources write.
+func decodeVariableQuery(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	text := ""
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+
+	object := struct {
+		Query  string `json:"query"`
+		RawSQL string `json:"rawSql"`
+	}{}
+	if err := json.Unmarshal(raw, &object); err == nil {
+		if object.RawSQL != "" {
+			return strings.TrimSpace(object.RawSQL)
+		}
+		return strings.TrimSpace(object.Query)
+	}
+	return ""
+}
+
+// decodeCurrentValue reads {"value": …}, which is a string for a single-value
+// variable and a list for a multi-value one.
+func decodeCurrentValue(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	current := struct {
+		Value json.RawMessage `json:"value"`
+	}{}
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return nil
+	}
+	return decodeStringOrList(current.Value)
+}
+
+func decodeStringOrList(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	text := ""
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	}
+
+	list := []string{}
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return dedupeNonEmpty(list)
+	}
+	return nil
+}
+
+func splitCommaList(value string) []string {
+	parts := []string{}
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
+}
+
+func looksLikeSQL(value string) bool {
+	return strings.Contains(strings.ToLower(value), "select ")
+}
+
+func dedupeNonEmpty(values []string) []string {
+	seen := map[string]bool{}
+	unique := []string{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		// "$__all" is Grafana's own sentinel, not a value any table name uses.
+		if trimmed == "" || trimmed == "$__all" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		unique = append(unique, trimmed)
+	}
+	return unique
 }

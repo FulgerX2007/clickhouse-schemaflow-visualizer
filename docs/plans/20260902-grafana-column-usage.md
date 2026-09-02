@@ -494,13 +494,62 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - Create: `models/testdata/dashboards/panel_shapes.json`
 - Modify: `models/grafana_test.go`
 
-- [ ] extract panels recursively including collapsed `row.panels` — a flat `panels[]` walk silently misses them
-- [ ] collect `rawSql` per target, filtering to `grafana-clickhouse-datasource`, inheriting the panel-level datasource when the target omits one
-- [ ] resolve `-- Dashboard --` targets via `panelId`; count unresolvable ones so they become `unknown`, never "no usage"
-- [ ] extract template variables: name, SQL (string form **and** `{query: …}` object form), values from `options`/`current`
-- [ ] ignore `yesoreyeram-infinity-datasource` and other non-ClickHouse targets
-- [ ] write tests for row nesting, dashboard-datasource refs, both variable query shapes, mixed-datasource dashboards, and a panel whose target omits its datasource
-- [ ] run tests — must pass before task 5
+- [x] extract panels recursively including collapsed `row.panels` — a flat `panels[]` walk silently misses them
+- [x] collect `rawSql` per target, inheriting the panel-level datasource when the target omits one
+- [x] resolve `-- Dashboard --` targets via `panelId`; count unresolvable ones so they become `unknown`, never "no usage"
+- [x] extract template variables: name, SQL (string form **and** `{query: …}` object form), values from `options`/`current`
+- [x] ignore `yesoreyeram-infinity-datasource` and other non-ClickHouse targets
+- [x] write tests for row nesting, dashboard-datasource refs, both variable query shapes, mixed-datasource dashboards, and a panel whose target omits its datasource
+- [x] run tests — must pass before task 5
+
+**Task 4 notes**
+
+- **Datasource filtering is a denylist, not an allowlist** — a deliberate change from the checklist's
+  "filter to `grafana-clickhouse-datasource`". Wrongly *excluding* a query makes the columns it reads
+  look unused, the one error that costs a schema; wrongly *including* one only invents usage that
+  keeps a column alive. So anything carrying `rawSql` is kept unless its datasource type is known not
+  to be this ClickHouse: infinity, prometheus, loki, elasticsearch, influx, graphite, jaeger, tempo,
+  testdata, grafana — plus postgres/mysql/mssql, whose `rawSql` would otherwise resolve against
+  same-named tables in an entirely different database. Legacy bare-string datasources and targets with
+  no datasource at all are kept.
+- **Hidden targets (`hide: true`) are kept**: a hidden query still names columns someone relies on.
+- A `-- Dashboard --` panel copies the referenced panel's queries, because it really does display
+  those columns. Chains do not recurse — only the referenced panel's *own* SQL is copied — and both a
+  dangling reference and a chained one produce a named warning.
+- Extraction warnings flow into `DashboardScan.Warnings` prefixed with the dashboard uid.
+- ➕ Test-suite hygiene: three assertions hardcoded "2 fixtures" and broke when a third was added.
+  They now derive the count from the fixture directory.
+
+**Corpus measurements** (167 deduped dashboards)
+
+| Measure | Value |
+|---|---|
+| panels extracted | 699 (661 carry SQL) |
+| `-- Dashboard --` reuse panels | 174, **all resolved** — zero dangling references |
+| panel queries | 727 |
+| template variables | 775 (450 with SQL, 490 with values, 2068 values total) |
+| **total SQL strings** | **1177** |
+
+**⚠️ Findings that change Task 5** — measured, not estimated:
+
+1. **889 of 1177 queries (76%) contain a `${var}`, and 433 have one in table position.** Every one of
+   those fails AST parsing outright (the Task 5 probe showed `${` breaks the parser in both table and
+   column position). Expansion is not an optimisation — without it roughly three quarters of the
+   corpus falls to the heuristic path, which under decision 3 downgrades everything it touches to
+   `unknown`, and the report becomes useless.
+2. **2666 of 2778 unresolvable references are variables that ARE declared but carry no values.**
+   Provisioned dashboards store `options: []` because Grafana populates them from the datasource at
+   query time. Only 112 references across 9 names are undeclared, and those are dominated by
+   `${__from}` / `${__to}`, which are built-in time macros rather than template variables.
+3. Therefore Task 5 needs three paths, not one:
+   - `${__from}` / `${__to}` and friends → substitute a literal; they are macros, not variables.
+   - declared-but-valueless in **table** position → expansion is impossible, so emit a **table-name
+     pattern** (`agg_${period}_distributed` → `agg_%_distributed`) and let Task 9 attribute usage to
+     **every** known table matching it. Conservative in the safe direction, and it recovers exactly
+     the 433 table-position cases that would otherwise report a whole table's columns as unused.
+   - declared-but-valueless elsewhere → a literal placeholder is enough to parse.
+4. 82 distinct variable names appear; the most common are `period`, `probe`, `probe_type`, `view`,
+   `apn`, `link`, `period2`.
 
 ### Task 5: `${var}` expansion and `$var` placeholder substitution
 
