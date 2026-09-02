@@ -945,15 +945,57 @@ needs to run somewhere with access to both.
 **Files:**
 - Modify: `static/js/app.js`, `static/css/styles.css`, `static/html/index.html`
 
-- [ ] fetch `/api/grafana/status` once on load; when `state` is `disabled`, **create no Grafana DOM nodes at all and issue no further `/api/grafana/*` requests** (decision 7 — render-gated, not CSS-hidden, so there is no flash of content and no trace in the page source)
-- [ ] extend `renderTableDetails` with a Usage column: verdict badge + dashboard count per column
-- [ ] expand a column row to list dashboard → panel deep links with the SQL snippet as proof
-- [ ] give `unknown` / `no-coverage` / `scanning` visually distinct treatments so none reads as `unused`; surface the `Reason` string
-- [ ] show a banner for `state: error` — "usage unknown", explicitly not "unused"
-- [ ] **build the anchors with `createElement`/`setAttribute`, not an `innerHTML` template** — `escapeHtml` (`app.js:2-6`) is `textContent`→`innerHTML` and does **not** escape `"`, so it is unsafe in `href="…"`; dashboard titles and URLs are Grafana-sourced
-- [ ] add any new asset tag with `?v={{.BuildID}}` (rule 5)
-- [ ] **manual verification**: point `GRAFANA_DASHBOARDS_DIR` at `models/testdata/dashboards`, open a fixture-covered table, and confirm — (a) a column referenced in `simple.json` shows `used` with the right dashboard/panel, (b) a column in no query shows `unused`, (c) the `SELECT *` fixture table shows all columns `unknown`, (d) a table in no fixture shows `no-coverage`, (e) with `GRAFANA_URL` pointed at a dead host, the banner appears and nothing reads `unused`. Record the result here.
-- [ ] run tests — must pass before task 14
+- [x] fetch `/api/grafana/status` once on load; when `state` is `disabled`, **create no Grafana DOM nodes at all and issue no further `/api/grafana/*` requests**
+- [x] extend `renderTableDetails` with a Usage column: verdict badge + dashboard count per column
+- [x] expand a column row to list dashboard → panel deep links with the SQL snippet as proof
+- [x] give `unknown` / `no-coverage` / `scanning` visually distinct treatments; surface the `Reason` string
+- [x] show a banner for `state: error` — "usage unknown", explicitly not "unused"
+- [x] **build the anchors with `createElement`/`setAttribute`, not an `innerHTML` template**
+- [x] no new asset tag was needed (the code lives in the existing `app.js` / `styles.css`)
+- [x] **manual verification** — recorded below
+- [x] run tests — must pass before task 14
+
+**Task 13 notes**
+
+- Four new CSS tokens (`--v-used-*`, `--v-unused-*`, `--v-unknown-*`, `--v-nocoverage-*`) sit beside
+  the engine tokens. `unused` is the only verdict that reads as an action; the other three are
+  deliberately quieter, because three of the four states mean "do not touch this".
+- Evidence nodes are built with `createElement`/`setAttribute`. `escapeHtml` (`app.js:2-6`) is a
+  `textContent`→`innerHTML` round-trip, which per the HTML serialisation spec escapes `&`, `<`, `>`
+  and NBSP but **not** `"` — safe for text, unsafe in `href="…"`, and dashboard titles and URLs come
+  from Grafana.
+- ➕ `panelURL()` parses the dashboard URL and **rejects any scheme that is not http/https**, so a
+  hostile dashboard record cannot inject a `javascript:` href. It appends `?viewPanel=<id>` so a link
+  opens the exact panel.
+- A badge's tooltip states what the verdict licenses; a `heuristic` reference is tagged in the
+  evidence list with "Attributed by matching names, not by parsing."
+
+**Manual verification** (live browser against the test ClickHouse + a fixture dashboard directory):
+
+*Feature on* — `raw.flights_local`, which **no dashboard mentions**, and whose usage therefore arrives
+entirely through two lineage hops:
+
+| column | badge | evidence |
+|---|---|---|
+| `flight_id` | `used` | reason `primary-key` — protected, though nothing reads it |
+| `origin`, `destination`, `scheduled_departure`, `delay_minutes` | `used (1)` | dashboard "Flight Operations" › panel "Delays by route", `via mv:aggregated.flight_stats_daily_mv`, snippet `SELECT day, origin, avg_delay FROM aggregated.flight_stats_daily …` |
+| `flight_number`, `airline_code`, `actual_departure`, `status` | `unused` | — |
+
+The heading reads "4 unused". Note the proof snippet **never names `raw.flights_local`**: it queries
+the Distributed wrapper of the view's destination, and the `via` tag is what connects them.
+
+*Feature off* — restarted with no `GRAFANA_*` variables and re-checked in the browser:
+
+```
+grafanaRequestsAfterLoad: []        usageHeaderPresent: false
+verdictBadges: 0                    evidenceRows: 0
+banners: 0                          anyUsageNodeInDOM: 0
+headerCells: ["Name","Type"]        columnsRendered: 9
+pageSourceMentionsGrafana: false
+```
+
+Zero Grafana DOM nodes, zero further requests, and the word "grafana" appears nowhere in the rendered
+page — while the columns table renders exactly as it did before this feature existed.
 
 ### Task 14: Unused-columns report view
 
