@@ -22,7 +22,8 @@ column that *is* used breaks a production dashboard — so the report is built t
 to distinguish "provably unused" from "we could not tell".
 
 Integration: the feature is **entirely optional**. With no Grafana configuration the app behaves
-exactly as it does today; nothing about the six existing endpoints changes.
+exactly as it does today; nothing about the six existing endpoints changes, and **the UI carries no
+trace of the feature at all** — see decision 7.
 
 ## Context (from discovery)
 
@@ -228,7 +229,23 @@ referenced table), which `graph.go` deliberately excludes from relationship grap
    `state: disabled | scanning | error | ok`, plus `mode` (`api` / `dir` / `api-fallback-dir`) so an
    automatic fallback is visible rather than silently misreporting provenance.
 
-7. **The verdict pass costs 2 ClickHouse queries, not ~350.** Built on `BuildColumnIndex()` (one
+7. **When the feature is off, the UI is not rendered — not merely hidden.** (User requirement.)
+   Nothing configured means no nav tab, no inspector Usage column, no badges, no banner, and **no
+   request to any `/api/grafana/*` endpoint except the single `status` call** that decides the
+   question. The elements are never created in the DOM rather than created and CSS-hidden, so there
+   is no flash of content before `status` returns and nothing in the page source hints at the
+   feature.
+
+   "Off" means `state: disabled`, i.e. **no source of any kind** — neither `GRAFANA_URL`+
+   `GRAFANA_TOKEN` nor `GRAFANA_DASHBOARDS_DIR`. A dashboards directory alone is a valid,
+   credential-free source and **does** show the UI; that is how the feature runs against a
+   provisioned dashboard repo.
+
+   The `error` and `scanning` states are **not** "off": those render the feature with an explicit
+   banner, because a Grafana that is configured but unreachable must never be indistinguishable from
+   one where nothing is used.
+
+8. **The verdict pass costs 2 ClickHouse queries, not ~350.** Built on `BuildColumnIndex()` (one
    query for all columns) plus one `SELECT database, name, engine, primary_key, sorting_key,
    partition_key FROM system.tables` for the key columns — instead of calling `GetTableColumns` per
    table across 175 tables. Both are `SELECT`s on system tables (rule 1). Note rule 4: `BuildColumnIndex`'s
@@ -360,14 +377,35 @@ Payload per state, for all four (this is what makes the frontend branch unambigu
 - Modify: `main.go`, `api/handlers.go`, `.env.example`
 - Create: `models/grafana_test.go`, `api/handlers_test.go`
 
-- [ ] add `GrafanaConfig` and `LoadGrafanaConfig(getenv func(string) string)` resolving mode api/dir/disabled — take the env getter as a parameter so mode resolution is testable without `os.Setenv`
-- [ ] read the eight `GRAFANA_*` variables in `main.go` next to the existing env block (rule 10 — **not** `config/`)
-- [ ] on Grafana config error, log a warning and continue serving — never `log.Fatalf` (contrast the ClickHouse path at `main.go:47`)
-- [ ] register `GET /api/grafana/status` returning `{"state":"disabled","reason":"not configured"}` when unset
-- [ ] write tests for mode resolution: api / dir / both / neither / url-without-token / token-without-url
-- [ ] write a test asserting the token never appears in the status payload
-- [ ] write a handler test for the disabled state, constructing `NewHandler(nil, …)` — no ClickHouse needed
-- [ ] run tests — must pass before task 2
+- [x] add `GrafanaConfig` and `LoadGrafanaConfig(getenv func(string) string)` resolving mode api/dir/disabled — take the env getter as a parameter so mode resolution is testable without `os.Setenv`
+- [x] read the eight `GRAFANA_*` variables in `main.go` next to the existing env block (rule 10 — **not** `config/`)
+- [x] on Grafana config error, log a warning and continue serving — never `log.Fatalf` (contrast the ClickHouse path at `main.go:47`)
+- [x] register `GET /api/grafana/status` returning `{"state":"disabled","reason":"not configured"}` when unset
+- [x] write tests for mode resolution: api / dir / both / neither / url-without-token / token-without-url
+- [x] write a test asserting the token never appears in the status payload
+- [x] write a handler test for the disabled state, constructing `NewHandler(nil, …)` — no ClickHouse needed
+- [x] run tests — must pass before task 2
+
+**Task 1 notes**
+
+- `NewHandler` gained a third parameter (`models.GrafanaStatus`). One caller, `main.go`. No HTTP
+  payload changed.
+- ➕ Added beyond the checklist: a route-registration test asserting the six original routes plus the
+  new one are present and that the route count is exactly 7, and a test asserting
+  `GET /api/connection` still omits the password. Both guard the "existing endpoints are frozen"
+  constraint cheaply, without a ClickHouse connection.
+- ➕ Added `.env.example` entries (rule 11 / rule 10 require it alongside `main.go`).
+- Half-configured API (`GRAFANA_URL` without `GRAFANA_TOKEN`) degrades to `dir` mode when a directory
+  is configured, and reports why in `status.reason`; with no directory it is `state: error`, not a
+  silent `disabled`.
+- ⚠️ **`golangci-lint` cannot run in this environment, and this is pre-existing, not caused by this
+  work.** `golangci-lint 2.10.1` is built with go1.26.0 while the installed toolchain is go1.27.0;
+  it panics with `file requires newer Go version go1.27 (application built with go1.26)`. Verified
+  against an unmodified `master` worktree, where it fails the same way (`could not import fmt …
+  export data version 4 is greater than maximum supported version 2`). `.ai/rules.md` requires
+  `golangci-lint run` before every commit, so **the linter must be upgraded before that rule can be
+  satisfied for any task in this plan**. `go build`, `go vet ./...`, `gofmt -l` and `go test ./...`
+  all pass.
 
 ### Task 2: Directory dashboard source
 
@@ -533,7 +571,7 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 **Files:**
 - Modify: `static/js/app.js`, `static/css/styles.css`, `static/html/index.html`
 
-- [ ] fetch `/api/grafana/status` once on load; hide every Grafana affordance when `state` is `disabled`
+- [ ] fetch `/api/grafana/status` once on load; when `state` is `disabled`, **create no Grafana DOM nodes at all and issue no further `/api/grafana/*` requests** (decision 7 — render-gated, not CSS-hidden, so there is no flash of content and no trace in the page source)
 - [ ] extend `renderTableDetails` with a Usage column: verdict badge + dashboard count per column
 - [ ] expand a column row to list dashboard → panel deep links with the SQL snippet as proof
 - [ ] give `unknown` / `no-coverage` / `scanning` visually distinct treatments so none reads as `unused`; surface the `Reason` string
@@ -550,7 +588,7 @@ repo. Without a seam, Tasks 9-10 and 12 cannot be tested at all.
 
 - [ ] **generalise `switchSection()` (`app.js:312-327`) from its hardcoded two-way `if/else` to N sections**, including the `localStorage.activeSection` restore path
 - [ ] **guard `exportHtml()` (`app.js:480`)**, whose `currentActiveSection === 'data-flow' ? dataflowDiagram : relationshipsDiagram` ternary would otherwise export the *relationships* diagram while the report is on screen
-- [ ] add an "Unused columns" section to the nav, gated on `state`
+- [ ] add an "Unused columns" section to the nav, **not appended to the DOM at all** when `state` is `disabled` (decision 7); the section tab, its panel and its `switchSection` entry are all conditional
 - [ ] render a sortable table: database, table, column, type, verdict, reason, dashboards-touching-table count
 - [ ] add database / verdict / min-confidence filters wired to the `/api/grafana/unused` query params
 - [ ] make each row click through to the table's inspector view
@@ -580,13 +618,15 @@ starting Task 13, since it also adds a fifth endpoint.
 - [ ] do **not** touch `classifyEngine()` or `glyphFor()`: `diagram.js:163` derives the class straight from `node.engine_type`; `classifyEngine()` maps ClickHouse *engine name strings* for the breadcrumb chip and `glyphFor()` feeds the command palette — neither is on the diagram path
 - [ ] build nodes with `createElementNS` only (rule 6)
 - [ ] deep-link panel nodes to `<grafana>/d/<uid>?viewPanel=<id>`
+- [ ] gate the section, its legend entries and its endpoint call on `state != disabled`, creating no DOM nodes when off (decision 7)
 - [ ] **manual verification**: a table referenced by several dashboards lays out without overlap, and Export HTML renders the new node kinds identically to the live view. Record the result here.
 - [ ] run tests — must pass before task 16
 
 ### Task 16: Verify acceptance criteria
 
 - [ ] verify both Overview deliverables are implemented: lineage browser (Task 13) and unused report (Task 14)
-- [ ] verify the disabled path: unset every `GRAFANA_*` variable, confirm the UI and all six original endpoints are unchanged from `master`
+- [ ] verify the disabled path: unset every `GRAFANA_*` variable, confirm all six original endpoints are unchanged from `master`, and confirm via DevTools that the page contains **no** Grafana DOM node (search the rendered source) and issues **no** `/api/grafana/*` request beyond the single `status` call (decision 7)
+- [ ] verify the directory-only path: with **only** `GRAFANA_DASHBOARDS_DIR` set — no URL, no token — the UI appears and works
 - [ ] verify the errored path: point `GRAFANA_URL` at a dead host — the app starts, serves, reports `state: error`, and every column reads `no-coverage`, never `unused`
 - [ ] verify the scanning path: no report is shown as empty before the first scan completes
 - [ ] verify `${var}` expansion resolves `aggregated.newcust_${period2}_distributed` against the real corpus

@@ -11,13 +11,18 @@ import (
 type Handler struct {
 	clickhouse *models.ClickHouseClient
 	config     models.Config
+	grafana    models.GrafanaStatus
 }
 
-// NewHandler creates a new Handler instance
-func NewHandler(clickhouse *models.ClickHouseClient, config models.Config) *Handler {
+// NewHandler creates a new Handler instance. grafana carries the dashboard-source
+// status; a zero value is not valid — pass models.NewGrafanaStatus even when the
+// feature is off, so the status endpoint reports "disabled" rather than an empty
+// state string.
+func NewHandler(clickhouse *models.ClickHouseClient, config models.Config, grafana models.GrafanaStatus) *Handler {
 	return &Handler{
 		clickhouse: clickhouse,
 		config:     config,
+		grafana:    grafana,
 	}
 }
 
@@ -31,7 +36,20 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 		api.GET("/dataflow/:database/:table", h.GetDataFlowGraph)
 		api.GET("/relationships/:database/:table", h.GetRelationshipsGraph)
 		api.GET("/table/:database/:table", h.GetTableDetails)
+		api.GET("/grafana/status", h.GetGrafanaStatus)
 	}
+}
+
+// GetGrafanaStatus reports whether dashboard-usage data is available and, when it
+// is not, why. Every state other than "ok" means the caller must not present any
+// column as unused.
+//
+// This deviates from the 400/500/200 contract the other handlers follow: a
+// disabled or misconfigured feature answers 200 with a state field rather than an
+// error status, so the frontend has a single unambiguous branch and a switched-off
+// integration does not look like a server fault.
+func (h *Handler) GetGrafanaStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, h.grafana)
 }
 
 // GetConnection returns the host, port, and TLS mode the server is connected
