@@ -38,7 +38,7 @@ credentials `default` / `default`
 - **CI/CD:** GitHub Actions — two workflows, both in `.github/workflows/`:
   - [`release.yml`](../../.github/workflows/release.yml) — trigger `push` on tags
     matching `v*`. Job `test`: `actions/checkout@v3` (`fetch-depth: 0`), `actions/setup-go@v4`
-    with `go-version: '1.26'`, `go mod download`, `go test ./...`, `go build -o
+    with `go-version: '1.27'`, `go mod download`, `go test ./...`, `go build -o
     clickhouse-schemaflow-visualizer .`. Job `goreleaser` (`needs: test`):
     `goreleaser/goreleaser-action@v6`, `distribution: goreleaser`, `version: '~> v2'`,
     `args: release --clean`, with `GITHUB_TOKEN` from `secrets.GITHUB_TOKEN`.
@@ -64,7 +64,7 @@ credentials `default` / `default`
     from the pushed semver tag plus the commit SHA
     ([`.github/workflows/docker-publish.yml`](../../.github/workflows/docker-publish.yml)).
     Built from the multi-stage [`Dockerfile`](../../Dockerfile): builder
-    `golang:1.26-alpine` running `CGO_ENABLED=0 GOOS=linux go build -o
+    `golang:1.27-alpine` running `CGO_ENABLED=0 GOOS=linux go build -o
     clickhouse-schemaflow-visualizer .`, runtime `alpine:3.18` with
     `ca-certificates`, `WORKDIR /app`, the binary and `static/` copied in,
     `EXPOSE 8080`, `CMD ["./clickhouse-schemaflow-visualizer"]`.

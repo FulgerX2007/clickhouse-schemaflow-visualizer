@@ -103,7 +103,7 @@ flowchart LR
 ## 5. Service dependencies
 
 - **Internal services this depends on:** none. The binary depends on exactly one external system, the ClickHouse instance named by `CLICKHOUSE_HOST`/`CLICKHOUSE_PORT` (main.go:30-31).
-- **Third-party / infra dependencies:** Go direct modules `github.com/ClickHouse/clickhouse-go/v2 v2.34.0`, `github.com/gin-gonic/gin v1.10.0`, `github.com/joho/godotenv v1.5.1`, plus the declared-but-unreferenced `github.com/go-faster/city v1.0.1` (go.mod). Frontend: the vendored `static/js/vendor/dagre.min.js`, and the two CDNs in section 4. Runtime images: `golang:1.26-alpine` builder and `alpine:3.18` with `ca-certificates` (Dockerfile).
+- **Third-party / infra dependencies:** Go direct modules `github.com/ClickHouse/clickhouse-go/v2 v2.34.0`, `github.com/gin-gonic/gin v1.10.0`, `github.com/joho/godotenv v1.5.1`, plus the declared-but-unreferenced `github.com/go-faster/city v1.0.1` (go.mod). Frontend: the vendored `static/js/vendor/dagre.min.js`, and the two CDNs in section 4. Runtime images: `golang:1.27-alpine` builder and `alpine:3.18` with `ca-certificates` (Dockerfile).
 - **Failure modes & fallbacks:**
   - Startup, ClickHouse unreachable or `Ping` fails: `log.Fatalf` — the process exits rather than starting degraded (main.go:45-48).
   - Startup, `./static/html/index.html` missing: `template.Must` panics (main.go:72). Both this path and `router.Static("/static", "./static")` (main.go:66) resolve relative to the working directory.

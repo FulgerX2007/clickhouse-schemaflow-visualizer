@@ -10,8 +10,8 @@ not document a rule, this guide says `TODO:` instead of inventing one.
 
 ## Getting set up
 
-Prerequisites: Go 1.26 or newer (`go.mod` declares `go 1.26.3`; `README.md:51` states
-"Go 1.26+"), and a reachable ClickHouse instance. Docker + Docker Compose are needed
+Prerequisites: Go 1.27 or newer (`go.mod` declares `go 1.27.0`; `README.md` states
+"Go 1.27+"), and a reachable ClickHouse instance. Docker + Docker Compose are needed
 only for the container workflows below.
 
 ```bash
@@ -228,7 +228,7 @@ Repository-specific notes on those duties:
 Releases are tag-driven and are the only time CI runs (`.github/workflows/release.yml`,
 `.github/workflows/docker-publish.yml`):
 
-- Pushing a tag matching `v*` triggers a `test` job (setup-go 1.26 → `go mod download`
+- Pushing a tag matching `v*` triggers a `test` job (setup-go 1.27 → `go mod download`
   → `go test ./...` → `go build`) and then GoReleaser (`goreleaser-action@v6`,
   `release --clean`) per `.goreleaser.yaml`.
 - The same tag triggers a Docker buildx build pushed to

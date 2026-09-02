@@ -50,7 +50,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 
 - Docker and Docker Compose
 - ClickHouse server
-- Go 1.26+ (only required if building from source — Docker users can skip)
+- Go 1.27+ (only required if building from source — Docker users can skip)
 
 ## 🚀 Installation and Setup
 
@@ -87,7 +87,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 
 ### Manual Setup
 
-Requires Go 1.26 or newer (see `go.mod`).
+Requires Go 1.27 or newer (see `go.mod`).
 
 1. Clone the repository:
    ```bash

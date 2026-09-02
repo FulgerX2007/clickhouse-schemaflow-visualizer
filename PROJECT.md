@@ -19,7 +19,7 @@ here. Read this before changing code. Keep it current (see CONTRIBUTING.md).
 
 ## 2. Technology stack
 
-- **Language(s) & version:** Go — module `github.com/fulgerX2007/clickhouse-schemaflow-visualizer` (`go.mod:1`), toolchain directive `go 1.26.3` (`go.mod:3`). CI pins `go-version: '1.26'` (`.github/workflows/release.yml`), the Docker builder is `golang:1.26-alpine` (`Dockerfile`). Frontend is vanilla HTML/CSS/JS with **no build step and no package manifest** the app uses (`static/`).
+- **Language(s) & version:** Go — module `github.com/fulgerX2007/clickhouse-schemaflow-visualizer` (`go.mod:1`), toolchain directive `go 1.27.0` (`go.mod:3`). CI pins `go-version: '1.27'` (`.github/workflows/release.yml`), the Docker builder is `golang:1.27-alpine` (`Dockerfile`). Frontend is vanilla HTML/CSS/JS with **no build step and no package manifest** the app uses (`static/`).
 - **Frameworks / key libraries:** Direct requires in `go.mod`:
   - `github.com/gin-gonic/gin v1.10.0` — HTTP router and JSON responses (`main.go:52`, `api/handlers.go`).
   - `github.com/ClickHouse/clickhouse-go/v2 v2.34.0` — native-protocol client (`models/clickhouse.go` `NewClickHouseClient`).
@@ -123,7 +123,7 @@ docker-compose up -d                               # local build, host network, 
 
 - **Environments:** TODO: no environment definitions, no per-environment config, and no promotion path exist in the repository. The only compose files are a local build (`docker-compose.yml`: `container_name: clickhouse-schemaflow-visualizer`, `ports 8080:8080`, `env_file: .env`, `restart: unless-stopped`, `network_mode: "host"`) and the local test stack (§7).
 - **Pipeline:** GitHub Actions — two workflows, **both triggered only by tags matching `v*`** (details in `docs/deployment/`, currently empty):
-  - `.github/workflows/release.yml` — job `test` (setup-go 1.26, `go mod download`, `go test ./...`, `go build`), then job `goreleaser` (goreleaser-action v6, `release --clean`).
+  - `.github/workflows/release.yml` — job `test` (setup-go 1.27, `go mod download`, `go test ./...`, `go build`), then job `goreleaser` (goreleaser-action v6, `release --clean`).
   - `.github/workflows/docker-publish.yml` — buildx, login to `ghcr.io`, metadata-action semver tags, push `ghcr.io/fulgerx2007/clickhouse-schemaflow-visualizer`.
 
   **Critical gap:** no workflow runs on push to `master` or on `pull_request`. Nothing — not build, not vet, not `go test`, not formatting — is checked automatically before a tag is cut. Verify changes locally with the command set in §7.

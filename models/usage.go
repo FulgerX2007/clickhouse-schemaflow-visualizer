@@ -204,7 +204,7 @@ func (c *ClickHouseClient) loadTableKeys(snapshot SchemaSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to query system.tables for keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var database, name, engine, primary, sorting, partition, createQuery string

@@ -1,6 +1,6 @@
 module github.com/fulgerX2007/clickhouse-schemaflow-visualizer
 
-go 1.26.3
+go 1.27.0
 
 require (
 	github.com/AfterShip/clickhouse-sql-parser v0.5.6
