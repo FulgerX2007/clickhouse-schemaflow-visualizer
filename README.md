@@ -114,8 +114,9 @@ Requires Go 1.27 or newer (see `go.mod`).
    # CLICKHOUSE_SERVER_NAME=clickhouse.example.com
 
    # Web Interface Settings
-   SERVER_ADDR=:8080
+   SERVER_ADDR=127.0.0.1:8080   # see the Security section before binding this publicly
    GIN_MODE=debug
+   # TRUSTED_PROXIES=10.0.0.0/8 # only when a reverse proxy sits in front; empty trusts none
 
    # Grafana column usage (optional — leave unset to disable the feature entirely)
    # Either the API…
@@ -228,6 +229,37 @@ dropping anything.
 ### 5. Export diagrams
 - Click **Export HTML** to save the current diagram as a self-contained HTML file you can drop into a wiki, attach to a ticket, or commit to a runbook. It works on all three diagram views; the Unused columns report is a table, not a diagram, and is not exportable.
 
+## 🔒 Security
+
+**This application has no authentication, no authorization and no rate limiting.**
+Every endpoint answers any caller that can reach the port, and between them they expose
+the complete schema metadata of the connected ClickHouse: database, table and column
+names, types, comments, row and byte counts, and the `SELECT` bodies of every
+materialized view. With the Grafana integration on, they also expose dashboard titles,
+dashboard URLs and SQL snippets from panel queries.
+
+That is a deliberate design, not an oversight — the visualizer is meant to run on a
+trusted network — but it means the port is the security boundary:
+
+- **Bind it locally.** `SERVER_ADDR=127.0.0.1:8080` rather than the `:8080` default,
+  which listens on every interface. Note that `docker-compose.yml` uses
+  `network_mode: "host"`, so the container binds the host's interfaces directly.
+- **Put an authenticating reverse proxy in front of it** if anyone but you needs it, and
+  set `TRUSTED_PROXIES` to that proxy so `X-Forwarded-For` is honoured from it alone.
+  Left empty, no proxy is trusted and client addresses come from the connection.
+- **Give ClickHouse a read-only user.** The app only ever runs `SELECT` against
+  `system.tables` and `system.columns`, so a user with nothing else granted costs you
+  nothing and bounds the damage of anything reaching it.
+- **Give Grafana a Viewer service-account token**, or skip credentials altogether with
+  `GRAFANA_DASHBOARDS_DIR`. Use `https://` — over `http://` the token is sent in
+  cleartext, which the server warns about at startup.
+
+`POST /api/grafana/refresh` is the only non-`GET` route. It writes nothing, and one scan
+at a time is allowed: concurrent calls and calls inside `GRAFANA_CACHE_TTL` are told they
+were debounced rather than re-scanning.
+
+Vulnerability reports: see [SECURITY.md](SECURITY.md).
+
 ## 🔧 How It Works
 
 The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers every database, table, and relationship in a single pass over `system.tables` and caches the result in memory for the lifetime of the process. The sidebar **↻** button re-renders the tree from that cache, so restart the app to pick up schema changes made after it started.
@@ -270,8 +302,8 @@ clickhouse-schemaflow-visualizer/
 │   └── handlers.go                   # /api/connection, /api/databases, /api/columns, /api/dataflow, /api/relationships, /api/table
 ├── assets/                           # Project assets
 │   └── screenshots/                  # Screenshots used in this README
-├── config/                           # Configuration handling
-│   └── config.go                     # Environment configuration loader (unused — main.go reads the env directly)
+├── config/                           # ClickHouse server config for the local test stack
+│   └── clickhouse-config.xml         # ZooKeeper, macros and remote_servers for docker-compose.clickhouse-test.yml
 ├── models/                           # Domain logic
 │   ├── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery
 │   └── graph.go                      # Graph payloads returned by /api/dataflow, /api/relationships, /api/columns
@@ -285,6 +317,7 @@ clickhouse-schemaflow-visualizer/
 │       ├── app.js                    # Sidebar, command palette, API wiring
 │       ├── diagram.js                # Dagre layout + SVG renderer for both views
 │       └── vendor/                   # Bundled third-party JS (Dagre)
+├── .dockerignore                     # Keeps .env, .git and logs out of the build context
 ├── .env.example                      # Example environment configuration
 ├── docker-compose.yml                # Production-style compose (visualizer only)
 ├── docker-compose.clickhouse-test.yml # Local test stack: ZooKeeper + ClickHouse + visualizer

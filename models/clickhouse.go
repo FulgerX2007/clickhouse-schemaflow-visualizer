@@ -226,7 +226,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 			return nil, fmt.Errorf("failed to scan table data: %v", err)
 		}
 
-		if !allowedDatabase(database) {
+		if !AllowedDatabase(database) {
 			continue
 		}
 
@@ -328,7 +328,12 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 	return tables, nil
 }
 
-func allowedDatabase(database string) bool {
+// AllowedDatabase reports whether a database is one this app will show.
+//
+// Exported because it is a boundary, not a display filter: the handlers that
+// take a database from the URL have to refuse the hidden ones too, or
+// /api/table/system/query_log answers for a database the sidebar denies.
+func AllowedDatabase(database string) bool {
 	switch {
 	case database == "":
 		return false

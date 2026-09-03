@@ -372,3 +372,46 @@ func TestRefreshGrafanaReportsAFailure(t *testing.T) {
 		t.Errorf("error = %q, want the failure named", got)
 	}
 }
+
+// The database allowlist has to hold on the URL, not just in the sidebar.
+//
+// newTestRouter carries a nil ClickHouse client, so this also proves the refusal
+// happens before anything reaches the database: were the check missing, the
+// handler would dereference nil rather than answer 404.
+func TestTableEndpointsRefuseHiddenDatabases(t *testing.T) {
+	router := newTestRouter(disabledIndex())
+
+	hidden := []string{"system", "information_schema", "INFORMATION_SCHEMA", "mysql", "performance_schema"}
+	paths := []string{"/api/table/%s/query_log", "/api/dataflow/%s/query_log", "/api/relationships/%s/query_log"}
+
+	for _, database := range hidden {
+		for _, shape := range paths {
+			path := strings.Replace(shape, "%s", database, 1)
+			code, body := getJSON(t, router, path)
+			if code != http.StatusNotFound {
+				t.Errorf("GET %s = %d, want %d", path, code, http.StatusNotFound)
+			}
+			if got, _ := body["error"].(string); got != "database not found" {
+				t.Errorf("GET %s error = %q", path, got)
+			}
+		}
+	}
+}
+
+// A visible database must still reach the handler. With a nil client that means
+// a panic, recovered by gin.Recovery, rather than the 404 above — so assert on
+// the refusal not happening rather than on a status code.
+func TestTableEndpointsAcceptVisibleDatabases(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gin.Recovery())
+	NewHandler(nil, models.Config{}, disabledIndex()).RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/table/shop/orders", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("a visible database was refused by the allowlist")
+	}
+}

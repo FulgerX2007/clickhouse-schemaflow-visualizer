@@ -20,7 +20,7 @@ go build -o clickhouse-schemaflow-visualizer .
 # Checks before committing
 go vet ./...
 golangci-lint run
-go test ./...           # api + models are covered; main + config have no tests
+go test ./...           # api + models are covered; main has no tests
 go test ./models -run TestName -v   # single test, once tests exist
 
 # Run with test ClickHouse (creates ZooKeeper + ClickHouse + app)
@@ -36,8 +36,8 @@ docker-compose up -d
 
 **Single-binary Go server** (Gin) serving both the API and static frontend:
 
-- `main.go` — entry point, loads `.env` config, creates ClickHouse client, registers routes, serves static files
-- `api/handlers.go` — thin Gin wrappers; all logic lives in `models`. Six REST endpoints under `/api/`:
+- `main.go` — entry point, loads `.env` config, creates ClickHouse client, registers routes, serves static files, and owns the `http.Server`. Two ordering traps live here: `securityHeaders` is registered **before** `handler.RegisterRoutes` because Gin applies middleware only to routes declared after the `Use` call — the pre-existing `noCache` sits after it and therefore covers the static files but not the API. And the server is built explicitly rather than via `router.Run`, whose timeouts are all zero; `WriteTimeout` is 120s because a Grafana refresh scan answers on the request goroutine.
+- `api/handlers.go` — thin Gin wrappers; all logic lives in `models`. Two shared helpers carry the boundary: `tableParams` refuses a `:database` that `models.AllowedDatabase` hides (404, before any query — the allowlist is not just a sidebar filter), and `serverError` logs the real error and answers with a fixed message, because a ClickHouse error names the host, port and user and the API is unauthenticated. Six REST endpoints under `/api/`:
   - `GET /connection` — current ClickHouse connection info (host, port, user, database, secure flag); password is never exposed
   - `GET /databases` — all databases with their tables (cached after first query)
   - `GET /columns` — flat column index across all visible tables (used by the `Ctrl+K` / `⌘K` command palette)
@@ -52,7 +52,7 @@ docker-compose up -d
   - `POST /grafana/refresh` — **the only non-`GET` route**; rebuilds the in-process scan, debounced by `GRAFANA_CACHE_TTL`, and writes nothing to ClickHouse
 - `models/clickhouse.go` — ClickHouse client + TLS setup, engine-aware relation discovery (`getTablesRelations`), MV SELECT parsing (`parseViewQuery`, `extractColumnMappings`, `extractBaseColumnName`), column-matching heuristics (`areColumnsRelated`)
 - `models/graph.go` — the JSON graph payloads (`DataFlowGraph`, `RelationshipsGraph`, `ColumnIndexEntry`) and the builders behind the three graph endpoints
-- `config/config.go` — **dead code**: a parallel env loader that nothing imports. `main.go` builds `models.Config` itself. Change `main.go` when adding a config value; either update or delete `config/` rather than assuming it's wired up.
+- `config/` — **no Go code**. It holds only `clickhouse-config.xml` for the local test stack. The parallel env loader that used to live here was deleted; `main.go` builds `models.Config` itself, so a new config value means `main.go`, `models.Config` and `.env.example`.
 - `static/` — frontend (vanilla HTML/CSS/JS); diagrams laid out with bundled Dagre (`static/js/vendor/dagre.min.js`) and rendered as inline SVG by `static/js/diagram.js`
 
 ### Relation discovery (`models/clickhouse.go`)
@@ -73,7 +73,7 @@ Per-engine parsing branches, all positional string splitting on `create_table_qu
 
 **Caching:** these three vars are populated on first use and never invalidated. The sidebar ↻ button only re-fetches `/api/databases`, which returns the same cached map — a **process restart is the only way to pick up ClickHouse schema changes**. `GetTableColumns`, `BuildColumnIndex`, and `isDistributedTable` are not cached and hit ClickHouse on every call.
 
-The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafana_index.go`), which owns the Grafana dashboard scan: mutex-guarded, TTL'd via `GRAFANA_CACHE_TTL`, and rebuildable through `POST /api/grafana/refresh` (the TTL doubles as that endpoint's debounce). A failed rescan keeps the previous good index rather than emptying it, because an empty usage index reads as "nothing uses anything". `LoadSchemaSnapshot` warms `getTablesRelations` before building, since that cache is otherwise filled lazily by the first `/api/databases` request and a background scan could run before any request arrives.
+The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafana_index.go`), which owns the Grafana dashboard scan: mutex-guarded, TTL'd via `GRAFANA_CACHE_TTL`, and rebuildable through `POST /api/grafana/refresh`. The TTL is that endpoint's debounce but **cannot bound it alone** — `scannedAt` is written only when a scan completes, so during the first one every caller reads a zero timestamp and passes the check. `claimScan`/`releaseScan` take a single scan slot under the write lock; concurrent callers are told they were debounced. Both `Start` and `Refresh` go through it. A failed rescan keeps the previous good index rather than emptying it, because an empty usage index reads as "nothing uses anything". `LoadSchemaSnapshot` warms `getTablesRelations` before building, since that cache is otherwise filled lazily by the first `/api/databases` request and a background scan could run before any request arrives.
 
 **Database filtering** is duplicated: `allowedDatabase()` in `clickhouse.go` and a hardcoded `NOT IN (...)` list in `BuildColumnIndex` in `graph.go`. Change both together or the command palette and sidebar disagree.
 
@@ -180,7 +180,8 @@ All via environment variables (or `.env` file), read in `main.go`:
 | `CLICKHOUSE_KEY_PATH` | (empty) | Client key |
 | `CLICKHOUSE_CA_PATH` | (empty) | Custom CA bundle |
 | `CLICKHOUSE_SERVER_NAME` | (empty) | TLS SNI / cert verification name |
-| `SERVER_ADDR` | `:8080` | Listen address |
+| `SERVER_ADDR` | `:8080` | Listen address. The default binds every interface, and the API is unauthenticated — see `SECURITY.md` |
+| `TRUSTED_PROXIES` | (empty) | Comma-separated IPs/CIDRs whose `X-Forwarded-For` Gin honours. Empty trusts none |
 | `GIN_MODE` | `debug` | `debug` or `release` |
 | `GRAFANA_URL` | (empty) | Grafana base URL; with `GRAFANA_TOKEN` enables API mode |
 | `GRAFANA_TOKEN` | (empty) | Service-account token — never logged, never in a response |

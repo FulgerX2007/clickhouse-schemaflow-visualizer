@@ -122,6 +122,19 @@ func LoadGrafanaConfig(getenv func(string) string, clickhouseDatabase string) (G
 		return cfg, err
 	}
 
+	// A URL that is not an absolute http(s) URL can never name a Grafana. Left
+	// unchecked it reached http.NewRequest as baseURL+path, where "grafana:3000"
+	// parses as the scheme "grafana" and every scan fails one request at a time
+	// with no statement of the cause.
+	if hasURL {
+		if err := validateGrafanaURL(cfg.URL); err != nil {
+			if hasDir {
+				cfg.Mode = GrafanaModeDir
+			}
+			return cfg, fmt.Errorf("GRAFANA_URL: %w%s", err, grafanaFallbackNote(hasDir))
+		}
+	}
+
 	switch {
 	case hasURL && hasToken:
 		cfg.Mode = GrafanaModeAPI
@@ -139,6 +152,25 @@ func LoadGrafanaConfig(getenv func(string) string, clickhouseDatabase string) (G
 	}
 
 	return cfg, nil
+}
+
+// validateGrafanaURL requires an absolute http(s) URL with a host.
+//
+// http is allowed rather than refused: plenty of internal Grafanas run without
+// TLS, and refusing them would be a functional regression. main.go logs that the
+// token travels in cleartext instead.
+func validateGrafanaURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("not a URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("must be an http:// or https:// URL, got %q", raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("has no host, got %q", raw)
+	}
+	return nil
 }
 
 // parseGrafanaOptions fills the tunables that only matter once a source is

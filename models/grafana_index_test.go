@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,16 +15,25 @@ type stubSource struct {
 	scan  DashboardScan
 	err   error
 	calls int
+	// delay stands in for the cost of a real scan — one HTTP request per
+	// dashboard. Slept outside the lock, so concurrent callers overlap here
+	// exactly as they would against a live Grafana.
+	delay time.Duration
 }
 
 func (s *stubSource) Dashboards() (DashboardScan, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls++
-	if s.err != nil {
-		return DashboardScan{}, s.err
+	scan, err, delay := s.scan, s.err, s.delay
+	s.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
 	}
-	return s.scan, nil
+	if err != nil {
+		return DashboardScan{}, err
+	}
+	return scan, nil
 }
 
 func (s *stubSource) callCount() int {
@@ -177,6 +187,41 @@ func TestGrafanaIndexRefreshIsDebounced(t *testing.T) {
 	}
 	if source.callCount() != calls {
 		t.Errorf("the source was re-read despite the debounce")
+	}
+}
+
+// A burst of refreshes before the first scan finishes must still cost one scan.
+//
+// The TTL cannot decide this on its own: scannedAt is written only when a scan
+// completes, so during the first one every caller reads a zero timestamp. This
+// is the regression that let twenty concurrent POST /api/grafana/refresh calls
+// buy twenty full scans of Grafana and ClickHouse on an endpoint with no
+// authentication and no rate limiting.
+func TestGrafanaIndexConcurrentRefreshScansOnce(t *testing.T) {
+	index, source := indexFixture(t)
+	source.mu.Lock()
+	source.delay = 100 * time.Millisecond
+	source.mu.Unlock()
+
+	const callers = 20
+	var wg sync.WaitGroup
+	var scanned int64
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, debounced := index.Refresh(); !debounced {
+				atomic.AddInt64(&scanned, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := source.callCount(); got != 1 {
+		t.Errorf("%d concurrent refreshes read the source %d times, want 1", callers, got)
+	}
+	if got := atomic.LoadInt64(&scanned); got != 1 {
+		t.Errorf("%d refreshes reported %d scans, want 1", callers, got)
 	}
 }
 

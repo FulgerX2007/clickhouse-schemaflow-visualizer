@@ -138,13 +138,18 @@ request would otherwise index against nil relations.
 (`models/graph.go:202,222`). Do not remove or raise it without a stated reason;
 relation graphs can cycle.
 
-**10. Configuration is added in `main.go`, not in `config/`.** `config/config.go` is
-dead code — nothing imports the package; `main.go:29-41` builds `models.Config`
-directly from `os.Getenv`. A new setting means: `main.go`, `models.Config`
-(`models/clickhouse.go:20-31`), and `.env.example`.
+**10. Configuration is added in `main.go`, not in `config/`.** `config/` holds no Go
+code — the parallel env loader that used to live there was deleted, along with the
+`GetClickHouseDSN()` that formatted the password into a URL. `main.go` builds
+`models.Config` directly from `os.Getenv`. A new setting means: `main.go`,
+`models.Config` (`models/clickhouse.go:20-31`), `.env.example`, and the config tables
+in `README.md` and `CLAUDE.md`.
 
-**11. Never commit `.env`.** It is gitignored (`.gitignore`); `.env.example` is the
-tracked template and must stay in step with the variables `main.go` reads.
+**11. Never commit `.env`, or a copy of it.** `.gitignore` covers `.env` and `.env.*`
+with `.env.example` excepted; `.env.bk` and `.env.local` were tracked until an audit
+found them. `.env.example` is the tracked template and must stay in step with the
+variables `main.go` reads. `.dockerignore` keeps the same files out of the build
+context, which `COPY . ./` would otherwise put in the builder layer.
 
 **12. Nothing is checked automatically before a tag exists.** Both workflows trigger
 only on `v*` tags (`.github/workflows/release.yml:3-6`,
@@ -306,7 +311,19 @@ Run the checks locally yourself (see *Testing standards*).
   pagination** anywhere in the codebase. Every endpoint exposes the full schema
   metadata of the connected ClickHouse to anyone who can reach the port. Do not
   present the server as safe to expose publicly, and do not add an endpoint that
-  assumes an authenticated caller.
+  assumes an authenticated caller. It is stated in `SECURITY.md` and in the README's
+  Security section; keep all three in step.
+- **An unauthenticated endpoint that costs something must bound itself.**
+  `POST /api/grafana/refresh` is one request per dashboard against Grafana plus a full
+  schema read against ClickHouse. `GrafanaIndex.claimScan` allows one scan at a time on
+  top of the `GRAFANA_CACHE_TTL` window — the TTL alone did not hold, because
+  `scannedAt` is written only when a scan finishes.
+- **Never return `err.Error()` to a caller.** Use `serverError` in `api/handlers.go`: it
+  logs the real error and answers with a fixed message. A ClickHouse failure names the
+  host, port and user it failed against.
+- **Anything taking a `:database` from the URL calls `models.AllowedDatabase`.** Use
+  `tableParams` in `api/handlers.go`. The check exists in three places (rule 4) and all
+  three are boundaries, not display filters.
 - TLS to ClickHouse is configurable (`CLICKHOUSE_SECURE`, `CLICKHOUSE_SKIP_VERIFY`,
   cert/key/CA/server-name paths, wired in `models/clickhouse.go`
   `NewClickHouseClient`). `CLICKHOUSE_SKIP_VERIFY=true` sets `InsecureSkipVerify` —
@@ -316,9 +333,9 @@ Run the checks locally yourself (see *Testing standards*).
   `go-faster/city` — the last of which is declared but imported by no Go file.
   TODO: decide whether `github.com/go-faster/city` is dropped from `go.mod` or put
   back to use.
-- There is no `SECURITY.md`, no `CODEOWNERS` and no issue/PR template
-  (`.github/` contains only the two workflow files). TODO: security contact and
-  vulnerability-reporting process.
+- `SECURITY.md` carries the reporting process and the threat model; keep it in step
+  with the README's Security section. There is still no `CODEOWNERS` and no issue/PR
+  template (`.github/` contains only the two workflow files).
 - TODO: branching, review and PR conventions. `README.md` says only "Contributions are
   welcome! Please feel free to submit a Pull Request." Commit subjects in history use
   conventional-commit prefixes and `.goreleaser.yaml:80-86` filters `^docs:` and
