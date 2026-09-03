@@ -9,6 +9,19 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ## [Unreleased]
 
+### Fixed
+
+- **A single request could kill the server process.** `simplifyColumnType`
+  (`models/clickhouse.go`) matched `Nullable` with `strings.Contains` and then unwrapped
+  it with `strings.TrimPrefix`. For a type that mentions `Nullable` without being one —
+  `SimpleAggregateFunction(groupBitOr, Nullable(Bool))`, which ClickHouse writes for a
+  nullable `Bool` under `SimpleAggregateFunction` — the prefix never matched, the string
+  never shrank, and the function recursed on it forever. A stack overflow is not
+  recoverable in Go, so one `GET /api/relationships/:database/:table` for a table holding
+  such a column took the whole application down. The branch now requires the
+  `Nullable(` prefix, so every recursion strips at least nine characters.
+  Covered by `models/clickhouse_test.go`, the package's first non-Grafana test.
+
 ### Added
 
 - **Grafana column usage.** Optional feature that maps Grafana dashboards to the
