@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type GrafanaIndex struct {
 	schema SchemaLoader
 
 	mu        sync.RWMutex
+	scanning  bool
 	state     GrafanaState
 	mode      GrafanaMode
 	reason    string
@@ -71,7 +73,22 @@ func (g *GrafanaIndex) Start() {
 	if g == nil || !g.config.Enabled() {
 		return
 	}
+	if !g.claimScan() {
+		return
+	}
 	go func() {
+		// A panic here would take the whole process down: this runs on its own
+		// goroutine, and the scan feeds dashboard-authored SQL through a
+		// third-party parser. The visualizer does not depend on this feature,
+		// so it must not be able to end the process.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Grafana dashboard scan panicked: %v", r)
+				g.recordFailure(fmt.Errorf("dashboard scan panicked: %v", r))
+			}
+		}()
+		defer g.releaseScan()
+
 		if err := g.scan(); err != nil {
 			log.Printf("Grafana dashboard scan failed: %v", err)
 		}
@@ -101,29 +118,56 @@ func (g *GrafanaIndex) Status() GrafanaStatus {
 	return status
 }
 
-// Refresh re-scans unless the last scan is still inside the TTL.
+// Refresh re-scans unless the last scan is still inside the TTL, or one is
+// already running.
 //
 // The TTL doubles as the debounce for POST /api/grafana/refresh. The HTTP API
 // has no authentication or rate limiting, and a refresh costs one request per
-// dashboard against Grafana, so an undebounced endpoint would be a free
-// amplification lever.
+// dashboard against Grafana plus a full schema read against ClickHouse, so an
+// undebounced endpoint is a free amplification lever.
+//
+// The TTL alone does not close it. scannedAt is only written when a scan
+// finishes, so between the first Start() and its completion — 147 dashboards
+// take a while — every concurrent call read a zero timestamp, passed the check
+// and launched its own full scan. Twenty simultaneous requests bought twenty
+// scans. Claiming the slot under the write lock is what actually bounds it:
+// whoever wins scans, everyone else is told they were debounced.
 func (g *GrafanaIndex) Refresh() (GrafanaStatus, bool) {
 	if g == nil || !g.config.Enabled() {
 		return g.Status(), false
 	}
 
-	g.mu.RLock()
-	last := g.scannedAt
-	g.mu.RUnlock()
-
-	if !last.IsZero() && time.Since(last) < g.config.CacheTTL {
+	if !g.claimScan() {
 		return g.Status(), true
 	}
+	defer g.releaseScan()
 
 	if err := g.scan(); err != nil {
 		log.Printf("Grafana dashboard refresh failed: %v", err)
 	}
 	return g.Status(), false
+}
+
+// claimScan takes the single scan slot, reporting false when the caller must
+// not scan: one is in flight, or the last one is still inside the TTL.
+func (g *GrafanaIndex) claimScan() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.scanning {
+		return false
+	}
+	if !g.scannedAt.IsZero() && time.Since(g.scannedAt) < g.config.CacheTTL {
+		return false
+	}
+	g.scanning = true
+	return true
+}
+
+func (g *GrafanaIndex) releaseScan() {
+	g.mu.Lock()
+	g.scanning = false
+	g.mu.Unlock()
 }
 
 // Usage returns one table's column verdicts.

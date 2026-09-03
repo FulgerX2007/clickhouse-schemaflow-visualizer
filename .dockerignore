@@ -1,0 +1,26 @@
+# The build context is COPY'd wholesale into the builder stage, so anything
+# listed here is something that must not end up in an image layer — or is
+# simply weight the build does not need.
+.env
+.env.*
+!.env.example
+*.log
+
+.git
+.gitignore
+.github
+.idea
+.claude
+.ai
+.playwright-mcp
+
+dist/
+memory-bank/
+assets/
+docs/
+*.md
+!README.md
+
+docker-compose*.yml
+Dockerfile
+.goreleaser.yaml

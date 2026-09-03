@@ -226,7 +226,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 			return nil, fmt.Errorf("failed to scan table data: %v", err)
 		}
 
-		if !allowedDatabase(database) {
+		if !AllowedDatabase(database) {
 			continue
 		}
 
@@ -328,7 +328,12 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 	return tables, nil
 }
 
-func allowedDatabase(database string) bool {
+// AllowedDatabase reports whether a database is one this app will show.
+//
+// Exported because it is a boundary, not a display filter: the handlers that
+// take a database from the URL have to refuse the hidden ones too, or
+// /api/table/system/query_log answers for a database the sidebar denies.
+func AllowedDatabase(database string) bool {
 	switch {
 	case database == "":
 		return false
@@ -377,11 +382,22 @@ func (c *ClickHouseClient) simplifyColumnType(columnType string) string {
 		return "uuid"
 	case strings.Contains(columnType, "Array"):
 		return "array"
-	case strings.Contains(columnType, "Nullable"):
-		// Extract the inner type
-		inner := strings.TrimPrefix(columnType, "Nullable(")
-		inner = strings.TrimSuffix(inner, ")")
+	case strings.HasPrefix(columnType, "Nullable("):
+		// Unwrap, and only when this really is a Nullable(...) wrapper.
+		//
+		// Matching on Contains instead recursed forever on any type that merely
+		// mentions Nullable inside another wrapper — ClickHouse writes
+		// "SimpleAggregateFunction(groupBitOr, Nullable(Bool))", where TrimPrefix
+		// finds no prefix to cut, TrimSuffix removes the final ")" once, and the
+		// next call receives a string it can no longer shorten. That is an
+		// unbounded self-call: it overflows the stack, and a stack overflow is
+		// not recoverable, so one request for such a table killed the whole
+		// process. Requiring the prefix guarantees each call strips at least
+		// nine characters and therefore terminates.
+		inner := strings.TrimSuffix(strings.TrimPrefix(columnType, "Nullable("), ")")
 		return c.simplifyColumnType(inner)
+	case strings.Contains(columnType, "Nullable"):
+		return "other"
 	default:
 		return "other"
 	}

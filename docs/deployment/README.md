@@ -120,9 +120,9 @@ that stale text.
   `os.Getenv` and a hard-coded default ([`main.go`](../../main.go) lines 19-42,
   83). A missing `.env` is only a warning — the process continues on the ambient
   environment ([`main.go`](../../main.go) line 20). There is no secrets manager
-  and no config-file parser in the code path.
-  [`config/config.go`](../../config/config.go) exists but is dead code: nothing
-  imports the `config` package; `main.go` builds `models.Config` inline.
+  and no config-file parser in the code path. `config/` holds no Go code — the
+  dead parallel loader that used to live there was deleted; `main.go` builds
+  `models.Config` inline.
 - **Where the file lives per deployment path:**
   - Source / compose: `.env` next to the binary's working directory; both compose
     files pass it with `env_file: ".env"`
@@ -157,7 +157,8 @@ that stale text.
 | `CLICKHOUSE_KEY_PATH` | Client key; loaded as a pair with the certificate | No | (empty) |
 | `CLICKHOUSE_CA_PATH` | CA appended to a fresh `x509` pool | No | (empty) |
 | `CLICKHOUSE_SERVER_NAME` | TLS `ServerName` (SNI) | No | (empty) |
-| `SERVER_ADDR` | Listen address for the HTTP server | No | `:8080` |
+| `SERVER_ADDR` | Listen address for the HTTP server. The default binds every interface and the API is unauthenticated — see Exposure below | No | `:8080` |
+| `TRUSTED_PROXIES` | Comma-separated IPs/CIDRs whose `X-Forwarded-For` Gin honours ([`main.go`](../../main.go) `trustedProxies`). Empty trusts none | No | (empty) |
 | `GIN_MODE` | `release` switches Gin to release mode; any other value leaves debug ([`main.go`](../../main.go) lines 24-26) | No | `debug` |
 
 Invalid integer or boolean values are not fatal: the process logs
@@ -168,6 +169,32 @@ Note that [`.env.example`](../../.env.example) ships `CLICKHOUSE_SECURE=true` an
 `CLICKHOUSE_SKIP_VERIFY=true`, i.e. TLS with certificate verification disabled. Any
 deployment copying it verbatim inherits that. TODO: decide and document the intended
 production TLS posture — the repo does not state one.
+
+## Exposure
+
+**The API has no authentication, no authorization and no rate limiting.** Every
+endpoint answers any caller that reaches the port, and between them they return the
+full schema metadata of the connected ClickHouse — names, types, comments, row and
+byte counts, materialized-view `SELECT` bodies — plus, when Grafana is configured,
+dashboard titles, URLs and panel SQL. The listening port is the security boundary.
+See [`SECURITY.md`](../../SECURITY.md) for the threat model.
+
+For any deployment:
+
+- Set `SERVER_ADDR=127.0.0.1:8080` unless something in front of it authenticates.
+  The `:8080` default listens on every interface, and `docker-compose.yml` uses
+  `network_mode: "host"`, so the container binds the host's interfaces directly.
+- Set `TRUSTED_PROXIES` to the reverse proxy when there is one. Left empty, Gin
+  trusts no proxy and takes the client address from the connection.
+- Point `CLICKHOUSE_USER` at a read-only account. The app only ever `SELECT`s from
+  `system.tables` and `system.columns`.
+- Use `https://` for `GRAFANA_URL`. Over `http://` the service-account token is sent
+  in cleartext; the server logs a warning at startup when it is.
+
+The server sets a Content-Security-Policy, `X-Content-Type-Options`,
+`X-Frame-Options: DENY` and `Referrer-Policy` on every response
+([`main.go`](../../main.go) `securityHeaders`), and runs with read, read-header,
+write and idle timeouts rather than the zero-valued defaults `router.Run` leaves.
 
 ## Runbook
 
@@ -439,7 +466,10 @@ the packaged path and container stdout/stderr otherwise.
 
 ### Secrets handling
 
-TODO: not defined. What is verifiable: `CLICKHOUSE_PASSWORD` is supplied as an
+TODO: not defined. What is verifiable: `.env` and every `.env.*` copy are gitignored
+and kept out of the Docker build context by `.dockerignore` — `COPY . ./` in the
+builder stage would otherwise put a developer's real credentials into an image
+layer. `CLICKHOUSE_PASSWORD` is supplied as an
 environment variable and is never returned by the API
 ([`api/handlers.go`](../../api/handlers.go) `GetConnection`);
 `/etc/clickhouse-schemaflow-visualizer/config.env` is created 0640
