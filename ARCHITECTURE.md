@@ -54,7 +54,7 @@ flowchart TD
 | Graph builders | `BuildDataFlowGraph` (forward/backward walk), `BuildRelationshipsGraph` (MV and regular paths), `BuildColumnIndex`, and `ClassifyEngine` — the five `EngineType` strings that are the styling contract with the frontend | `models/graph.go` |
 | Frontend shell | Go template; every CSS/JS tag carries `?v={{.BuildID}}`; loads Font Awesome from cdnjs and Inter/JetBrains Mono from Google Fonts | `static/html/index.html` (fonts :7-9, dagre :31, font-awesome :31, app scripts :171-172) |
 | App controller | Sidebar tree, filter, `Ctrl+K`/`⌘K` command palette backed by `/api/columns`, table inspector, metadata toggles persisted in `localStorage`, Export HTML (which inlines `commonDiagramCss()`, duplicating diagram styling that also lives in `static/css/styles.css`) | `static/js/app.js` (graph fetch :333-334, details :388, column index :746, `commonDiagramCss` :540) |
-| Diagram renderer | `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})` and `.renderRelationships(container, graph, {onTableClick})`; lays out with Dagre and builds SVG with `createElementNS` (`innerHTML` is used only to clear the container, diagram.js:243, :415) | `static/js/diagram.js` |
+| Diagram renderer | `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})`, `.renderRelationships(container, graph, {onTableClick})` and `.renderDashboardUsage(container, usage, {engineType, hideUnconnected, onOpen})`; the first two lay out with Dagre, the third places its two ranks itself. All build SVG with `createElementNS` (`innerHTML` is used only to clear the container) | `static/js/diagram.js` |
 | Layout engine (vendored) | Dagre, bundled in-repo; no build step and no package manifest the app uses | `static/js/vendor/dagre.min.js` |
 | Styles | Diagram and shell CSS, including the per-`EngineType` classes | `static/css/styles.css` |
 | Dead code | `config.LoadConfig()` exists but no Go file imports package `config` (verified by grep over `main.go api models config`); `main.go` builds `models.Config` inline instead. Do not treat it as the active loader. | `config/config.go` |
@@ -177,7 +177,8 @@ endpoint and every verdict is gated on.
 | `models/usage.go` | `SchemaSnapshot` (2 queries), usage index, lineage propagation, verdicts, report |
 | `models/grafana_index.go` | Scan orchestration, caching, state, statistics |
 | `api/handlers.go` | Four routes, all gated on the state envelope |
-| `static/js/app.js`, `static/css/styles.css` | Usage column in the inspector, unused-columns report section |
+| `static/js/app.js`, `static/css/styles.css` | Usage column in the inspector, unused-columns report section, Dashboards diagram section |
+| `static/js/diagram.js` | `renderDashboardUsage` — the bipartite table-columns ⇄ Grafana-panels picture, laid out by hand rather than by Dagre |
 
 **Dependency added:** `github.com/AfterShip/clickhouse-sql-parser` v0.5.6 — the first new
 direct dependency since the original four. Rationale and measurements in

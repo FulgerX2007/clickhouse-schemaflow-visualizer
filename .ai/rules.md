@@ -66,10 +66,18 @@ Adding, renaming or removing an engine family is a **five-file change in one com
 across eleven sites. A node whose engine key has no CSS class renders unstyled with no
 error.
 
+In the Dashboards diagram the verdict owns the dot's **colour** and nothing else owns it.
+Whether a query names the column is carried by the dot's **fill** (`.du-named`). Do not
+merge the two: red is a licence to drop, and a column held alive only by a materialized
+view has no line yet must never be painted red.
+
 The column-usage verdicts (`used`, `unused`, `unknown`, `no-coverage`) are a smaller
 contract of the same kind: `models/usage.go` produces them, `static/js/app.js` maps them
-in `VERDICT_LABELS`/`VERDICT_TITLES`, and `static/css/styles.css` styles them via
-`--v-*` tokens and `.verdict-<name>` classes.
+in `VERDICT_LABELS`/`VERDICT_TITLES`, `static/js/diagram.js` maps them in
+`verdictTooltip()` and emits them as `.du-col.verdict-<name>` classes on the Dashboards
+diagram's column rows, and `static/css/styles.css` styles them via `--v-*` tokens, the
+`.verdict-<name>` classes and the `.du-dot` rules — which are duplicated a fourth time in
+`commonDiagramCss()` for the export.
 
 **4. `allowedDatabase()` and `BuildColumnIndex`'s `NOT IN` list change together.**
 `models/clickhouse.go:331-346` excludes `system`, `information_schema`,
@@ -88,10 +96,17 @@ entry after an upgrade. The Font Awesome CDN tag additionally carries
 
 **6. Do not reintroduce HTML-string assembly in the diagram path.**
 `static/js/diagram.js` builds SVG exclusively with `createElementNS` and
-`createTextNode` (`:19-31`); `innerHTML` appears only to clear a container
-(`:243`, `:415`). Column names and transformation expressions arrive from ClickHouse
-DDL and are written as text nodes — there is no sanitiser on that path, so switching
-to string templating turns metadata into injected markup.
+`createTextNode` (`el()`, `:19-31`); `innerHTML` appears only at the top of each of the
+three renderers, to clear a container. Column names and transformation expressions arrive
+from ClickHouse DDL — and, in `renderDashboardUsage`, dashboard titles, panel titles and
+SQL snippets arrive from Grafana — and are all written as text nodes. There is no
+sanitiser on that path, so switching to string templating turns third-party metadata into
+injected markup.
+
+The same rule covers URLs. `renderDashboardUsage` never constructs one: `dashboard_url` is
+Grafana's, it is empty in directory mode (where `new URL("", origin)` silently resolves to
+this app), and a `javascript:` value would be a navigation primitive. The renderer calls
+`opts.onOpen(ref)` and `panelURL()` in `app.js` performs the empty and scheme checks.
 
 **7. The sidebar label is an HTML fragment with a matching regex on the other side.**
 `generateTableListContent` emits `<i class="fa-solid …"></i> name` with the name
@@ -176,14 +191,28 @@ Run the checks locally yourself (see *Testing standards*).
 - Do not rename/move public symbols without updating all references and docs. The
   exported surface that the frontend depends on includes the JSON field names in
   `models/graph.go` (`engine_type`, `expression`, `nodes`/`edges`, `tables`/`edges`)
-  and the `window.SchemaDiagram.renderDataFlow` / `.renderRelationships` signatures in
-  `static/js/diagram.js`.
+  and the `window.SchemaDiagram.renderDataFlow` / `.renderRelationships` /
+  `.renderDashboardUsage` signatures in `static/js/diagram.js`. `renderDashboardUsage`
+  additionally depends on the JSON field names in `models/usage.go` (`columns`,
+  `direct`/`derived`, `dashboards`, `dashboard_uid`/`_title`/`_url`, `panel_id`,
+  `panel_title`, `via`, `confidence`, `verdict`).
 - Engine parsing in `models/clickhouse.go` is positional string splitting on
   `create_table_query` / `engine_full` — no SQL parser. It is sensitive to
   ClickHouse's exact DDL formatting, so any "cleanup" there must be verified against
   the test stack (see *Testing standards*), not reasoned about.
+- Two labels anchored from opposite ends of the same row must be fitted, not written in
+  full. `fitRowPair()` in `static/js/diagram.js` splits the available width between them
+  and `clip()` truncates without `truncateExpression`'s 8-character floor, which would
+  overrun the budget and put them back on top of each other. ClickHouse types reach 36
+  characters; the card is 240-268px.
 - Diagram CSS is duplicated: `static/css/styles.css` and `commonDiagramCss()` in
-  `static/js/app.js:540` (inlined into the Export HTML output). Change both.
+  `static/js/app.js` (inlined into the Export HTML output). Change both. Note that an SVG
+  `rect` with no `fill` paints **black**, not transparent, so a rule like
+  `.rel-col-hit { fill: transparent; }` is load-bearing in *both* copies — omitting it
+  from the export copy is what turned every column row of an exported diagram into a
+  black bar. `exportHtml()`'s inline `:root` block is a third copy of the design tokens
+  the SVG references (`--t-*-fg`, `--grafana-fg`, `--v-*-fg`); a token missing there
+  renders that element with an undefined variable, in the export only.
 
 ## Database modification rules
 

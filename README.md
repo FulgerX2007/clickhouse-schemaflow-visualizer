@@ -34,6 +34,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 - 🔦 Click a column in the Relationships view to highlight its full data path through the pipeline
 - ⌨️ Live sidebar filter and a `Ctrl+K` / `⌘K` command palette to jump to any table, column, or engine
 - 📈 Optional metadata overlay showing row counts and on-disk size per table
+- 📊 **Dashboards** view — the selected table's columns wired by line to the Grafana panels that read them, with lineage hops marked on the edge (optional; off unless Grafana is configured)
 - 🧹 **Unused columns** view — which columns no Grafana dashboard reads, so dead schema can be found and dropped (optional; off unless Grafana is configured)
 - 🔗 Per-column dashboard lineage in the inspector: which dashboard and panel reads each column, with the SQL that proves it
 - 💾 Export the current diagram as a standalone HTML file (self-contained, no external assets)
@@ -146,9 +147,10 @@ Requires Go 1.27 or newer (see `go.mod`).
 Point the app at Grafana and it will tell you which ClickHouse columns nobody reads.
 
 Set either `GRAFANA_URL` + `GRAFANA_TOKEN` (a Viewer service account) or
-`GRAFANA_DASHBOARDS_DIR` (a directory of dashboard JSON — no credentials needed). An
-**Unused columns** tab then appears, and every column in the table inspector gets a
-verdict. **With neither set, the feature is off and the UI carries no trace of it.**
+`GRAFANA_DASHBOARDS_DIR` (a directory of dashboard JSON — no credentials needed).
+**Dashboards** and **Unused columns** tabs then appear, and every column in the table
+inspector gets a verdict. **With neither set, the feature is off and the UI carries no
+trace of it.**
 
 Usage is traced through ClickHouse's own lineage, which is the part that matters: a
 dashboard querying a `Distributed` wrapper marks the local table behind it, and a
@@ -188,12 +190,43 @@ dropping anything.
 - **Data Flow** shows the selected table at the centre, with upstream sources flowing in and downstream materializations flowing out — the easiest way to see how data reaches a given table.
 - **Relationships** shows the same set of tables broken out column-by-column, with the parsed SELECT expression of any Materialized View labelled on the connecting edge. Click a column to highlight its full upstream and downstream path.
 
-### 3. Toggle table metadata
+### 3. Trace a table to its Grafana dashboards
+*(Only when Grafana is configured — see [Finding unused columns](#-finding-unused-columns).)*
+
+- The **Dashboards** tab puts the selected table on the left and every dashboard that
+  reads it on the right, with one line per column a panel touches.
+- A line means *this query names this column*. **Solid** where a panel names it directly,
+  **dashed** where the read arrives through a `Distributed` wrapper (tagged
+  `via distributed`) — which maps columns one-to-one and so is just as precise.
+- A **faint dotted line from the table header** means the panel reads the table without
+  naming a column of it: either nothing in its query could be resolved (`table-level`),
+  or it only reaches this table through a materialized view (`via mv`). A view keeps
+  every column its `SELECT` touches alive, so that is a statement about the table, not
+  about any one column — drawn per-column it would put a line on all 39 columns of a
+  40-column table for a panel that names one. Those columns are still `used`; their dots
+  say so, and the line above the diagram counts them.
+- The dot beside each column carries two things. Its **colour** is the verdict, so red
+  means `unused` — safe to drop — and never anything else. Its **fill** says whether any
+  query names the column: a **hollow** dot has no line reaching it.
+- Hollow does not mean droppable. A table feeding a materialized view has every column
+  legitimately in use while no dashboard names a single one, so those dots are hollow and
+  green. Only a **filled or hollow red** dot licenses a drop.
+- Click a column, or a panel, to trace just its connections and dim the rest; `Esc` or a
+  click on the background clears it.
+- **read only** hides columns no panel reads, which makes a wide table legible.
+- Above a dozen panels the view shows **one row per dashboard** — a table read by 26
+  dashboards across 89 panels is unreadable drawn panel-by-panel. Tick **panels** for
+  per-panel rows. The line above the diagram always states the real totals, and says so
+  when some dashboards are not drawn.
+- Click a dashboard's header to open it in Grafana, or double-click a panel row to open
+  that panel directly. (Directory mode has no base URL, so there is nothing to open.)
+
+### 4. Toggle table metadata
 - Use the **show metadata** toggle below the engine-types legend to display row counts and on-disk size under each table name in the sidebar.
 - Metadata is hidden by default for a cleaner sidebar; your preference is persisted in `localStorage`.
 
-### 4. Export diagrams
-- Click **Export HTML** to save the current diagram as a self-contained HTML file you can drop into a wiki, attach to a ticket, or commit to a runbook.
+### 5. Export diagrams
+- Click **Export HTML** to save the current diagram as a self-contained HTML file you can drop into a wiki, attach to a ticket, or commit to a runbook. It works on all three diagram views; the Unused columns report is a table, not a diagram, and is not exportable.
 
 ## 🔧 How It Works
 

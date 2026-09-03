@@ -22,6 +22,17 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
   `Nullable(` prefix, so every recursion strips at least nine characters.
   Covered by `models/clickhouse_test.go`, the package's first non-Grafana test.
 
+- **Column names and types overlapped in the Relationships diagram.** The two are
+  anchored from opposite ends of a 240px card and were both written in full, so a real
+  ClickHouse type — `SimpleAggregateFunction(sum, UInt64)`, 36 characters — printed
+  straight through the column name beside it. Both are now fitted to the space with the
+  full text on hover.
+
+- **Exported Relationships diagrams rendered every column row as a black bar.**
+  `commonDiagramCss()` in `static/js/app.js` carried `.rel-col-bg` but not
+  `.rel-col-hit`, and an SVG `rect` with no `fill` paints black. The live stylesheet
+  makes those hit targets transparent; the exported copy did not.
+
 ### Added
 
 - **Grafana column usage.** Optional feature that maps Grafana dashboards to the
@@ -47,8 +58,35 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
     `GET /api/grafana/unused`, and `POST /api/grafana/refresh` — the first non-`GET`
     route in the API, debounced by `GRAFANA_CACHE_TTL`. It writes nothing to ClickHouse.
   - New UI: a Usage column with per-column verdicts and dashboard evidence in the table
-    inspector, and an "Unused columns" report section. Both are created only when Grafana
-    is configured.
+    inspector, an "Unused columns" report section, and a **Dashboards** diagram showing
+    the selected table's columns wired to the Grafana panels that read them. All three
+    are created only when Grafana is configured.
+  - A line in the Dashboards view means the query *names* that column. Reads arriving
+    through a `Distributed` wrapper keep their per-column line, because that propagation
+    maps columns one-to-one; reads arriving through a materialized view are drawn as a
+    single line from the table header, because that propagation is a table-level blanket
+    (every column the view's `SELECT` touches) and drawing it per-column put 39 lines on
+    a 40-column table for a panel naming one. The blanketed columns stay `used` and are
+    counted in words above the diagram.
+  - The dot beside each column carries two facts in two channels: **colour** is the
+    verdict, so red means `unused` and nothing else, and **fill** is whether any query
+    names the column, so a hollow dot means no line reaches it. They are separate because
+    a table feeding a materialized view has every column legitimately in use with no
+    dashboard naming one — colouring those red would invite dropping live data.
+  - The Dashboards view draws one line per (column, panel) pair, from the same
+    `/api/grafana/usage/:database/:table` payload the inspector uses — no new endpoint.
+    Line style carries the strength of the claim: solid for a direct read, dashed for one
+    reached through lineage (`via distributed`, `via mv`), and a faint dotted line from
+    the table header for a panel that reads the table but named no column a parser could
+    resolve. Clicking a column or a panel traces just its connections; the "read only"
+    toggle hides columns nothing reads. Exportable through **Export HTML** like the other
+    diagrams.
+  - The view is built for real schemas: above a dozen panels it collapses to one row per
+    dashboard, drops to the 30 most-connected dashboards with the remainder stated on the
+    card, fades the resting edge state past 120 lines so a focused selection reads, and
+    prints the totals in words above the diagram. A table read by 26 dashboards across 89
+    panels renders 864px of content instead of 3852px; per-panel rows stay available
+    behind the "panels" toggle.
   - Eight new environment variables, documented in `README.md`, `CLAUDE.md`,
     `.env.example` and `docs/deployment/`.
 - **The repository's first tests.** Six `*_test.go` files covering `api/` and `models/`,

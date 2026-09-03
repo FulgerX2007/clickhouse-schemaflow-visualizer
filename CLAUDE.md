@@ -88,14 +88,16 @@ The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafa
 ### Frontend
 
 - `static/html/index.html` is served through `html/template` (not `router.Static`) so asset URLs carry `?v={{.BuildID}}`, a per-process cache-buster. **Any new CSS/JS tag must include `?v={{.BuildID}}`** or it will be cached across upgrades. Everything under `/static` is served with `Cache-Control: no-cache`.
-- `diagram.js` exposes `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})` and `.renderRelationships(container, graph, {onTableClick})`; `app.js` owns sidebar, palette, inspector, and Export HTML.
-- Export HTML inlines `commonDiagramCss()` from `app.js`, so diagram styling lives in two places — update both when changing node/edge appearance.
+- `diagram.js` exposes `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})`, `.renderRelationships(container, graph, {onTableClick})` and `.renderDashboardUsage(container, usage, {engineType, hideUnconnected, onOpen})`; `app.js` owns sidebar, palette, inspector, and Export HTML.
+- Export HTML inlines `commonDiagramCss()` from `app.js`, so diagram styling lives in two places — update both when changing node/edge appearance. An SVG `rect` with no `fill` paints **black**, so every transparent hit-target rule has to be in both copies; leaving `.rel-col-hit` out of the export copy turned every column row of an exported diagram into a black bar.
 
 ### Grafana column usage (optional)
 
 Off unless `GRAFANA_URL`+`GRAFANA_TOKEN` or `GRAFANA_DASHBOARDS_DIR` is set. When off, the
 UI **creates no DOM node for it at all** and issues no request beyond the single status
-call — it is render-gated, not CSS-hidden.
+call — it is render-gated, not CSS-hidden. Two sections are built this way, by
+`buildDashboardUsageSection()` and `buildUnusedSection()` in `app.js`, both called from
+`loadGrafanaStatus()`; `sectionElements()` therefore tolerates their keys being absent.
 
 Pipeline, in `models/`:
 
@@ -122,10 +124,44 @@ Points that are easy to get wrong:
   this: it resolves at most one source column per expression and leaves `SourceTable`
   empty, so `SELECT a + b AS c` would make `b` look droppable.
 - **Verdicts require `state == ok`.** Any other state yields `no-coverage` for every
-  column. An absent scan is indistinguishable from a Grafana where nothing is used.
+  column. An absent scan is indistinguishable from a Grafana where nothing is used. The
+  Dashboards diagram makes the same distinction visually: a state other than `ok` renders
+  a notice, never an empty diagram, because a picture with no lines in it reads as
+  "nothing uses this table".
 - Key columns and `Distributed` tables are never reported `unused`.
 - The verdict pass costs **two** ClickHouse queries total (`BuildColumnIndex` plus one
   `system.tables` read), not one per table.
+- **The Dashboards diagram is built for a schema read by hundreds of dashboards, not
+  for the test fixture.** Drawn one row per panel with one card per dashboard, a table
+  read by 26 dashboards across 89 panels is 3852px tall — the viewBox then scales it to
+  a fifth of legible size, which reads as an empty tab. So above `DU_AUTO_PANEL_LIMIT`
+  panels it collapses to one row per dashboard, caps at `DU_MAX_ROWS` (stating what was
+  dropped), and fades edges past `DU_DENSE_EDGES`. `renderDashboardUsage` returns a
+  `stats` object precisely because the picture at that size cannot be counted off, and
+  `app.js` prints those totals above it.
+- **`grafanaStatus` is fetched once at boot and a first scan outlives it.** 147
+  dashboards take longer than page load, so anything gated on the cached state would
+  say "scanning" forever. `syncGrafanaState` refreshes it from any endpoint that returns
+  a state envelope, and `pollGrafanaStatus` watches a scan to completion.
+- **The two lineage families differ in precision, and the diagram must not treat them
+  alike.** `propagateDistributed` carries each column across a wrapper individually, so a
+  `distributed:` reference names a real column and earns a per-column line.
+  `propagateViews` is a cross product of every column a view's SELECT touches against
+  every panel reading its destination — deliberately, so `SELECT a + b AS c` cannot make
+  `b` look droppable — so an `mv:` reference is a claim about the *table*. Drawn
+  per-column it produced 39 identical lines out of a 40-column table, burying the one
+  column the panel actually named. `renderDashboardUsage` draws `mv:` claims as a single
+  line off the table header and states the affected count in words; those columns are
+  still `used`, and their dots still say so.
+- **The Dashboards diagram adds no endpoint.** It is a second reading of the
+  `/api/grafana/usage/:database/:table` payload the inspector already fetches into
+  `currentUsage`: per-column `direct`/`derived` refs become the lines, and a ref present
+  in the table-level `dashboards` list but in no column's refs becomes a line off the
+  table header — a panel that reads the table without naming a resolvable column.
+- **`renderDashboardUsage` never builds a URL.** `dashboard_url` comes from Grafana and is
+  empty in directory mode, where `new URL("", origin)` would resolve to this app. The
+  renderer hands the reference to `onOpen`, and `panelURL()` in `app.js` owns both the
+  empty check and the `http`/`https` scheme check.
 
 ## Configuration
 
