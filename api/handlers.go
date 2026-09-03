@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/fulgerX2007/clickhouse-schemaflow-visualizer/models"
@@ -41,6 +42,40 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	}
 }
 
+// tableParams reads and checks the :database/:table pair every table endpoint
+// takes.
+//
+// The allowlist check is the point. models.AllowedDatabase is applied when the
+// sidebar is built, so system, mysql and information_schema never appear in it
+// — but nothing stopped a caller from asking for them by URL, and
+// /api/table/system/query_log answered with that table's columns. A filter that
+// only holds on the path the UI happens to use is not a boundary.
+func tableParams(c *gin.Context) (string, string, bool) {
+	database := c.Param("database")
+	table := c.Param("table")
+
+	if database == "" || table == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+		return "", "", false
+	}
+	if !models.AllowedDatabase(database) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "database not found"})
+		return "", "", false
+	}
+	return database, table, true
+}
+
+// serverError logs what actually went wrong and answers with a fixed message.
+//
+// A ClickHouse error names the host, port and user it failed against, and the
+// API has no authentication, so err.Error() in the response body hands the
+// connection details to anyone who can reach the port. The operator needs them;
+// the caller does not.
+func serverError(c *gin.Context, message string, err error) {
+	log.Printf("%s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": message})
+}
+
 // grafanaReady writes the status envelope and reports false when dashboard usage
 // is not available.
 //
@@ -73,11 +108,8 @@ func (h *Handler) GetGrafanaStatus(c *gin.Context) {
 // GetGrafanaUsage returns one table's column verdicts and the dashboards behind
 // them, for the inspector panel.
 func (h *Handler) GetGrafanaUsage(c *gin.Context) {
-	database := c.Param("database")
-	table := c.Param("table")
-
-	if database == "" || table == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+	database, table, ok := tableParams(c)
+	if !ok {
 		return
 	}
 	if !h.grafanaReady(c) {
@@ -138,11 +170,7 @@ func (h *Handler) GetConnection(c *gin.Context) {
 func (h *Handler) GetDatabases(c *gin.Context) {
 	databases, err := h.clickhouse.GetDatabases()
 	if err != nil {
-		c.JSON(
-			http.StatusInternalServerError, gin.H{
-				"error": err.Error(),
-			},
-		)
+		serverError(c, "failed to list databases", err)
 		return
 	}
 
@@ -155,7 +183,7 @@ func (h *Handler) GetDatabases(c *gin.Context) {
 func (h *Handler) GetColumnIndex(c *gin.Context) {
 	idx, err := h.clickhouse.BuildColumnIndex()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		serverError(c, "failed to build the column index", err)
 		return
 	}
 	c.JSON(http.StatusOK, idx)
@@ -164,17 +192,14 @@ func (h *Handler) GetColumnIndex(c *gin.Context) {
 // GetDataFlowGraph returns a structured DAG of upstream/downstream tables for
 // the selected table. The frontend lays this out with Dagre and renders it as SVG.
 func (h *Handler) GetDataFlowGraph(c *gin.Context) {
-	database := c.Param("database")
-	table := c.Param("table")
-
-	if database == "" || table == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+	database, table, ok := tableParams(c)
+	if !ok {
 		return
 	}
 
 	graph, err := h.clickhouse.BuildDataFlowGraph(database, table)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		serverError(c, "failed to build the data flow graph", err)
 		return
 	}
 
@@ -184,17 +209,14 @@ func (h *Handler) GetDataFlowGraph(c *gin.Context) {
 // GetRelationshipsGraph returns a column-level graph for the selected table, with
 // edges carrying transformation expressions where the backend can infer them.
 func (h *Handler) GetRelationshipsGraph(c *gin.Context) {
-	database := c.Param("database")
-	table := c.Param("table")
-
-	if database == "" || table == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+	database, table, ok := tableParams(c)
+	if !ok {
 		return
 	}
 
 	graph, err := h.clickhouse.BuildRelationshipsGraph(database, table)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		serverError(c, "failed to build the relationships graph", err)
 		return
 	}
 
@@ -205,17 +227,14 @@ func (h *Handler) GetRelationshipsGraph(c *gin.Context) {
 // for the selected table. Used by the inspector panel that opens when a node
 // is clicked in either diagram view.
 func (h *Handler) GetTableDetails(c *gin.Context) {
-	database := c.Param("database")
-	table := c.Param("table")
-
-	if database == "" || table == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "database and table parameters are required"})
+	database, table, ok := tableParams(c)
+	if !ok {
 		return
 	}
 
 	details, err := h.clickhouse.GetTableColumns(database, table)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		serverError(c, "failed to read the table", err)
 		return
 	}
 

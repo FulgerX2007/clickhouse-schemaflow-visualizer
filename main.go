@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fulgerX2007/clickhouse-schemaflow-visualizer/api"
@@ -68,6 +69,9 @@ func main() {
 			log.Printf("Warning: Grafana dashboard source unavailable: %v", err)
 			grafanaConfig.Mode = models.GrafanaModeDisabled
 		} else {
+			if grafanaConfig.Mode == models.GrafanaModeAPI && strings.HasPrefix(grafanaConfig.URL, "http://") {
+				log.Printf("Warning: GRAFANA_URL is http://, so GRAFANA_TOKEN is sent in cleartext")
+			}
 			log.Printf("Grafana dashboard source enabled (mode: %s)", grafanaConfig.Mode)
 		}
 	}
@@ -81,6 +85,18 @@ func main() {
 
 	// Initialize router
 	router := gin.Default()
+
+	// No proxy is trusted by default. Gin otherwise takes X-Forwarded-For from
+	// any peer, so a client could choose the address that lands in the access
+	// log. Set TRUSTED_PROXIES when the app really does run behind one.
+	if err := router.SetTrustedProxies(trustedProxies()); err != nil {
+		log.Fatalf("Failed to set trusted proxies: %v", err)
+	}
+
+	// Registered before the routes: Gin only applies middleware to routes added
+	// after the Use call, so anything registered later would cover the static
+	// files and miss the whole API.
+	router.Use(securityHeaders)
 
 	// Create API handlers
 	handler := api.NewHandler(clickhouseClient, clickhouseConfig, grafanaIndex)
@@ -113,11 +129,68 @@ func main() {
 	// Get server address from environment or use default
 	serverAddr := getEnv("SERVER_ADDR", ":8080")
 
-	// Start the server
+	// Start the server.
+	//
+	// Built explicitly rather than through router.Run, whose http.Server has
+	// every timeout at zero: a client that opens a connection and dribbles out
+	// a request header holds a goroutine for as long as it likes, and enough of
+	// them exhaust the process. The write timeout is generous because a refresh
+	// scan answers on the request goroutine.
+	server := &http.Server{
+		Addr:              serverAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	log.Printf("Server starting on %s", serverAddr)
-	if err := router.Run(serverAddr); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+// securityHeaders sets the response headers that cost nothing and close off the
+// classes of attack the frontend cannot defend against on its own.
+//
+// The CSP is the substantive one. Scripts may only come from this origin, so a
+// table or column name that ever escaped escaping still could not execute.
+// Styles need 'unsafe-inline' because the sidebar rows carry a style attribute
+// built server-side (generateTableListContent in models/clickhouse.go), and the
+// two stylesheet CDNs are the ones index.html actually loads.
+func securityHeaders(c *gin.Context) {
+	c.Header("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self'; "+
+			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; "+
+			"font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"object-src 'none'; "+
+			"base-uri 'none'; "+
+			"form-action 'self'; "+
+			"frame-ancestors 'none'")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Frame-Options", "DENY")
+	c.Header("Referrer-Policy", "no-referrer")
+}
+
+// trustedProxies reads TRUSTED_PROXIES as a comma-separated list of IPs or
+// CIDRs. Empty means trust none, which is the right default for a server whose
+// documented deployment is a direct bind.
+func trustedProxies() []string {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		return nil
+	}
+	var proxies []string
+	for _, entry := range strings.Split(raw, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			proxies = append(proxies, entry)
+		}
+	}
+	return proxies
 }
 
 // Helper function to get environment variable with a default value

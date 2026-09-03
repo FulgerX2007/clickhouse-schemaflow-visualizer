@@ -1,5 +1,7 @@
 .idea/
 .env
+.env.*
+!.env.example
 memory-bank/
 dist/
 *.log

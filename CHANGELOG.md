@@ -9,6 +9,30 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ## [Unreleased]
 
+### Fixed
+
+- **A single request could kill the server process.** `simplifyColumnType`
+  (`models/clickhouse.go`) matched `Nullable` with `strings.Contains` and then unwrapped
+  it with `strings.TrimPrefix`. For a type that mentions `Nullable` without being one —
+  `SimpleAggregateFunction(groupBitOr, Nullable(Bool))`, which ClickHouse writes for a
+  nullable `Bool` under `SimpleAggregateFunction` — the prefix never matched, the string
+  never shrank, and the function recursed on it forever. A stack overflow is not
+  recoverable in Go, so one `GET /api/relationships/:database/:table` for a table holding
+  such a column took the whole application down. The branch now requires the
+  `Nullable(` prefix, so every recursion strips at least nine characters.
+  Covered by `models/clickhouse_test.go`, the package's first non-Grafana test.
+
+- **Column names and types overlapped in the Relationships diagram.** The two are
+  anchored from opposite ends of a 240px card and were both written in full, so a real
+  ClickHouse type — `SimpleAggregateFunction(sum, UInt64)`, 36 characters — printed
+  straight through the column name beside it. Both are now fitted to the space with the
+  full text on hover.
+
+- **Exported Relationships diagrams rendered every column row as a black bar.**
+  `commonDiagramCss()` in `static/js/app.js` carried `.rel-col-bg` but not
+  `.rel-col-hit`, and an SVG `rect` with no `fill` paints black. The live stylesheet
+  makes those hit targets transparent; the exported copy did not.
+
 ### Added
 
 - **Grafana column usage.** Optional feature that maps Grafana dashboards to the
@@ -34,8 +58,35 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
     `GET /api/grafana/unused`, and `POST /api/grafana/refresh` — the first non-`GET`
     route in the API, debounced by `GRAFANA_CACHE_TTL`. It writes nothing to ClickHouse.
   - New UI: a Usage column with per-column verdicts and dashboard evidence in the table
-    inspector, and an "Unused columns" report section. Both are created only when Grafana
-    is configured.
+    inspector, an "Unused columns" report section, and a **Dashboards** diagram showing
+    the selected table's columns wired to the Grafana panels that read them. All three
+    are created only when Grafana is configured.
+  - A line in the Dashboards view means the query *names* that column. Reads arriving
+    through a `Distributed` wrapper keep their per-column line, because that propagation
+    maps columns one-to-one; reads arriving through a materialized view are drawn as a
+    single line from the table header, because that propagation is a table-level blanket
+    (every column the view's `SELECT` touches) and drawing it per-column put 39 lines on
+    a 40-column table for a panel naming one. The blanketed columns stay `used` and are
+    counted in words above the diagram.
+  - The dot beside each column carries two facts in two channels: **colour** is the
+    verdict, so red means `unused` and nothing else, and **fill** is whether any query
+    names the column, so a hollow dot means no line reaches it. They are separate because
+    a table feeding a materialized view has every column legitimately in use with no
+    dashboard naming one — colouring those red would invite dropping live data.
+  - The Dashboards view draws one line per (column, panel) pair, from the same
+    `/api/grafana/usage/:database/:table` payload the inspector uses — no new endpoint.
+    Line style carries the strength of the claim: solid for a direct read, dashed for one
+    reached through lineage (`via distributed`, `via mv`), and a faint dotted line from
+    the table header for a panel that reads the table but named no column a parser could
+    resolve. Clicking a column or a panel traces just its connections; the "read only"
+    toggle hides columns nothing reads. Exportable through **Export HTML** like the other
+    diagrams.
+  - The view is built for real schemas: above a dozen panels it collapses to one row per
+    dashboard, drops to the 30 most-connected dashboards with the remainder stated on the
+    card, fades the resting edge state past 120 lines so a focused selection reads, and
+    prints the totals in words above the diagram. A table read by 26 dashboards across 89
+    panels renders 864px of content instead of 3852px; per-panel rows stay available
+    behind the "panels" toggle.
   - Eight new environment variables, documented in `README.md`, `CLAUDE.md`,
     `.env.example` and `docs/deployment/`.
 - **The repository's first tests.** Six `*_test.go` files covering `api/` and `models/`,
@@ -87,10 +138,79 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ### Removed
 
+- **`config/config.go`.** A second environment loader that nothing imported — `main.go`
+  builds `models.Config` itself — carrying a `GetClickHouseDSN()` that interpolated the
+  password into a connection URL. Dead code that formats a credential is a leak waiting
+  for its first caller. `config/` now holds only `clickhouse-config.xml`, which the local
+  test stack uses.
+
 ### Security
 
-No code changes: at the time these entries were written `git log v2.1.0..HEAD` was empty,
-and the work above is documentation only.
+Findings from an audit of the whole codebase. No exploited vulnerability is known; these
+close the gaps the audit found.
+
+- **`POST /api/grafana/refresh` could be made to scan without limit.** The TTL debounce
+  read `scannedAt`, released the lock, then scanned — and `scannedAt` is only written when
+  a scan *finishes*. During the first scan every caller therefore read a zero timestamp,
+  passed the check and started its own: twenty concurrent requests bought twenty full
+  scans, each one HTTP request per dashboard against Grafana plus a full schema read
+  against ClickHouse. The endpoint has no authentication and needs no CSRF token, so any
+  page an operator visited could fire it cross-origin. A scan slot is now claimed under
+  the write lock, so one runs at a time and everyone else is told they were debounced.
+  Covered by `TestGrafanaIndexConcurrentRefreshScansOnce`.
+
+- **The database allowlist did not hold on the URL.** `AllowedDatabase` (formerly
+  `allowedDatabase`) was applied when the sidebar was built and nowhere else, so
+  `GET /api/table/system/query_log` — and the `dataflow` and `relationships` equivalents —
+  answered for the databases the sidebar hides. They now return 404 before touching
+  ClickHouse. Covered by `TestTableEndpointsRefuseHiddenDatabases`.
+
+- **500 responses carried the raw error.** A ClickHouse failure names the host, port and
+  user it failed against, and the API is unauthenticated. The error is now logged and the
+  response carries a fixed message.
+
+- **The server had no timeouts.** `router.Run` leaves every `http.Server` timeout at zero,
+  so a client that dribbles out a request header holds a goroutine indefinitely. The
+  server is now built explicitly with read, read-header, write and idle timeouts.
+
+- **Security headers on every response.** A Content-Security-Policy that allows scripts
+  only from this origin, plus `X-Content-Type-Options`, `X-Frame-Options` and
+  `Referrer-Policy`. Registered before the routes, because Gin applies middleware only to
+  routes declared after the `Use` call — added later it would have covered the static
+  files and missed the entire API.
+
+- **No proxy is trusted by default.** Gin otherwise accepts `X-Forwarded-For` from any
+  peer. The new `TRUSTED_PROXIES` variable names the proxy when there is one.
+
+- **A panic in the dashboard scan no longer ends the process.** The scan runs on its own
+  goroutine and feeds dashboard-authored SQL through a third-party parser; it now recovers
+  and records the failure. (Probing the parser with pathological input — 100k-deep
+  parentheses, 20k-deep nested selects, unclosed groups — did not crash it. This is
+  defence in depth, not a fix for a known crash.)
+
+- **`GRAFANA_URL` is validated.** It must be an absolute `http(s)` URL with a host;
+  anything else is reported at startup instead of failing one request at a time. A plain
+  `http://` URL is allowed — internal Grafanas run without TLS — but the server now warns
+  that the token travels in cleartext.
+
+- **The Docker image no longer runs as root**, and its base moved from `alpine:3.18`,
+  which has been end-of-life since May 2025, to `alpine:3.22`. A new `.dockerignore` keeps
+  `.env`, `.git` and logs out of the build context — `COPY . ./` had been putting a
+  developer's real ClickHouse credentials into the builder layer.
+
+- **`.env.bk` and `.env.local` are no longer tracked**, and `.gitignore` now covers
+  `.env.*` with `.env.example` excepted. Every historical value in both files was checked:
+  no live credential was ever committed. The pattern was the risk.
+
+- **Dependencies bumped** past the advisories that reached imported packages:
+  `golang.org/x/net` 0.47.0 → 0.57.0 (five `x/net/html` advisories, an `idna` one and an
+  HTTP/2 `SETTINGS_MAX_FRAME_SIZE` infinite loop), `golang.org/x/text` 0.31.0 → 0.41.0,
+  `golang.org/x/crypto` 0.45.0 → 0.56.0, `github.com/klauspost/compress` 1.18.0 → 1.18.7.
+  `govulncheck` reported eight vulnerabilities in imported packages before and none after;
+  none were ever reachable from this code.
+
+- **`SECURITY.md` added** — reporting process, supported versions, and the threat model
+  the API's lack of authentication implies. The README now states it too.
 
 ## Released versions
 

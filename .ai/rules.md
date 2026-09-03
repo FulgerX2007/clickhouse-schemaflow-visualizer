@@ -66,10 +66,18 @@ Adding, renaming or removing an engine family is a **five-file change in one com
 across eleven sites. A node whose engine key has no CSS class renders unstyled with no
 error.
 
+In the Dashboards diagram the verdict owns the dot's **colour** and nothing else owns it.
+Whether a query names the column is carried by the dot's **fill** (`.du-named`). Do not
+merge the two: red is a licence to drop, and a column held alive only by a materialized
+view has no line yet must never be painted red.
+
 The column-usage verdicts (`used`, `unused`, `unknown`, `no-coverage`) are a smaller
 contract of the same kind: `models/usage.go` produces them, `static/js/app.js` maps them
-in `VERDICT_LABELS`/`VERDICT_TITLES`, and `static/css/styles.css` styles them via
-`--v-*` tokens and `.verdict-<name>` classes.
+in `VERDICT_LABELS`/`VERDICT_TITLES`, `static/js/diagram.js` maps them in
+`verdictTooltip()` and emits them as `.du-col.verdict-<name>` classes on the Dashboards
+diagram's column rows, and `static/css/styles.css` styles them via `--v-*` tokens, the
+`.verdict-<name>` classes and the `.du-dot` rules — which are duplicated a fourth time in
+`commonDiagramCss()` for the export.
 
 **4. `allowedDatabase()` and `BuildColumnIndex`'s `NOT IN` list change together.**
 `models/clickhouse.go:331-346` excludes `system`, `information_schema`,
@@ -88,10 +96,17 @@ entry after an upgrade. The Font Awesome CDN tag additionally carries
 
 **6. Do not reintroduce HTML-string assembly in the diagram path.**
 `static/js/diagram.js` builds SVG exclusively with `createElementNS` and
-`createTextNode` (`:19-31`); `innerHTML` appears only to clear a container
-(`:243`, `:415`). Column names and transformation expressions arrive from ClickHouse
-DDL and are written as text nodes — there is no sanitiser on that path, so switching
-to string templating turns metadata into injected markup.
+`createTextNode` (`el()`, `:19-31`); `innerHTML` appears only at the top of each of the
+three renderers, to clear a container. Column names and transformation expressions arrive
+from ClickHouse DDL — and, in `renderDashboardUsage`, dashboard titles, panel titles and
+SQL snippets arrive from Grafana — and are all written as text nodes. There is no
+sanitiser on that path, so switching to string templating turns third-party metadata into
+injected markup.
+
+The same rule covers URLs. `renderDashboardUsage` never constructs one: `dashboard_url` is
+Grafana's, it is empty in directory mode (where `new URL("", origin)` silently resolves to
+this app), and a `javascript:` value would be a navigation primitive. The renderer calls
+`opts.onOpen(ref)` and `panelURL()` in `app.js` performs the empty and scheme checks.
 
 **7. The sidebar label is an HTML fragment with a matching regex on the other side.**
 `generateTableListContent` emits `<i class="fa-solid …"></i> name` with the name
@@ -123,13 +138,18 @@ request would otherwise index against nil relations.
 (`models/graph.go:202,222`). Do not remove or raise it without a stated reason;
 relation graphs can cycle.
 
-**10. Configuration is added in `main.go`, not in `config/`.** `config/config.go` is
-dead code — nothing imports the package; `main.go:29-41` builds `models.Config`
-directly from `os.Getenv`. A new setting means: `main.go`, `models.Config`
-(`models/clickhouse.go:20-31`), and `.env.example`.
+**10. Configuration is added in `main.go`, not in `config/`.** `config/` holds no Go
+code — the parallel env loader that used to live there was deleted, along with the
+`GetClickHouseDSN()` that formatted the password into a URL. `main.go` builds
+`models.Config` directly from `os.Getenv`. A new setting means: `main.go`,
+`models.Config` (`models/clickhouse.go:20-31`), `.env.example`, and the config tables
+in `README.md` and `CLAUDE.md`.
 
-**11. Never commit `.env`.** It is gitignored (`.gitignore`); `.env.example` is the
-tracked template and must stay in step with the variables `main.go` reads.
+**11. Never commit `.env`, or a copy of it.** `.gitignore` covers `.env` and `.env.*`
+with `.env.example` excepted; `.env.bk` and `.env.local` were tracked until an audit
+found them. `.env.example` is the tracked template and must stay in step with the
+variables `main.go` reads. `.dockerignore` keeps the same files out of the build
+context, which `COPY . ./` would otherwise put in the builder layer.
 
 **12. Nothing is checked automatically before a tag exists.** Both workflows trigger
 only on `v*` tags (`.github/workflows/release.yml:3-6`,
@@ -176,14 +196,28 @@ Run the checks locally yourself (see *Testing standards*).
 - Do not rename/move public symbols without updating all references and docs. The
   exported surface that the frontend depends on includes the JSON field names in
   `models/graph.go` (`engine_type`, `expression`, `nodes`/`edges`, `tables`/`edges`)
-  and the `window.SchemaDiagram.renderDataFlow` / `.renderRelationships` signatures in
-  `static/js/diagram.js`.
+  and the `window.SchemaDiagram.renderDataFlow` / `.renderRelationships` /
+  `.renderDashboardUsage` signatures in `static/js/diagram.js`. `renderDashboardUsage`
+  additionally depends on the JSON field names in `models/usage.go` (`columns`,
+  `direct`/`derived`, `dashboards`, `dashboard_uid`/`_title`/`_url`, `panel_id`,
+  `panel_title`, `via`, `confidence`, `verdict`).
 - Engine parsing in `models/clickhouse.go` is positional string splitting on
   `create_table_query` / `engine_full` — no SQL parser. It is sensitive to
   ClickHouse's exact DDL formatting, so any "cleanup" there must be verified against
   the test stack (see *Testing standards*), not reasoned about.
+- Two labels anchored from opposite ends of the same row must be fitted, not written in
+  full. `fitRowPair()` in `static/js/diagram.js` splits the available width between them
+  and `clip()` truncates without `truncateExpression`'s 8-character floor, which would
+  overrun the budget and put them back on top of each other. ClickHouse types reach 36
+  characters; the card is 240-268px.
 - Diagram CSS is duplicated: `static/css/styles.css` and `commonDiagramCss()` in
-  `static/js/app.js:540` (inlined into the Export HTML output). Change both.
+  `static/js/app.js` (inlined into the Export HTML output). Change both. Note that an SVG
+  `rect` with no `fill` paints **black**, not transparent, so a rule like
+  `.rel-col-hit { fill: transparent; }` is load-bearing in *both* copies — omitting it
+  from the export copy is what turned every column row of an exported diagram into a
+  black bar. `exportHtml()`'s inline `:root` block is a third copy of the design tokens
+  the SVG references (`--t-*-fg`, `--grafana-fg`, `--v-*-fg`); a token missing there
+  renders that element with an undefined variable, in the export only.
 
 ## Database modification rules
 
@@ -277,7 +311,19 @@ Run the checks locally yourself (see *Testing standards*).
   pagination** anywhere in the codebase. Every endpoint exposes the full schema
   metadata of the connected ClickHouse to anyone who can reach the port. Do not
   present the server as safe to expose publicly, and do not add an endpoint that
-  assumes an authenticated caller.
+  assumes an authenticated caller. It is stated in `SECURITY.md` and in the README's
+  Security section; keep all three in step.
+- **An unauthenticated endpoint that costs something must bound itself.**
+  `POST /api/grafana/refresh` is one request per dashboard against Grafana plus a full
+  schema read against ClickHouse. `GrafanaIndex.claimScan` allows one scan at a time on
+  top of the `GRAFANA_CACHE_TTL` window — the TTL alone did not hold, because
+  `scannedAt` is written only when a scan finishes.
+- **Never return `err.Error()` to a caller.** Use `serverError` in `api/handlers.go`: it
+  logs the real error and answers with a fixed message. A ClickHouse failure names the
+  host, port and user it failed against.
+- **Anything taking a `:database` from the URL calls `models.AllowedDatabase`.** Use
+  `tableParams` in `api/handlers.go`. The check exists in three places (rule 4) and all
+  three are boundaries, not display filters.
 - TLS to ClickHouse is configurable (`CLICKHOUSE_SECURE`, `CLICKHOUSE_SKIP_VERIFY`,
   cert/key/CA/server-name paths, wired in `models/clickhouse.go`
   `NewClickHouseClient`). `CLICKHOUSE_SKIP_VERIFY=true` sets `InsecureSkipVerify` —
@@ -287,9 +333,9 @@ Run the checks locally yourself (see *Testing standards*).
   `go-faster/city` — the last of which is declared but imported by no Go file.
   TODO: decide whether `github.com/go-faster/city` is dropped from `go.mod` or put
   back to use.
-- There is no `SECURITY.md`, no `CODEOWNERS` and no issue/PR template
-  (`.github/` contains only the two workflow files). TODO: security contact and
-  vulnerability-reporting process.
+- `SECURITY.md` carries the reporting process and the threat model; keep it in step
+  with the README's Security section. There is still no `CODEOWNERS` and no issue/PR
+  template (`.github/` contains only the two workflow files).
 - TODO: branching, review and PR conventions. `README.md` says only "Contributions are
   welcome! Please feel free to submit a Pull Request." Commit subjects in history use
   conventional-commit prefixes and `.goreleaser.yaml:80-86` filters `^docs:` and

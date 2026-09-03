@@ -32,9 +32,13 @@ async function loadGrafanaStatus() {
         const response = await fetch('/api/grafana/status');
         if (!response.ok) return;
         grafanaStatus = await response.json();
+        buildDashboardUsageSection();
         buildUnusedSection();
         // The remembered section may only now exist.
         restoreActiveSection();
+        // A table may have been selected while the status was still in flight.
+        renderDashboardUsage();
+        if (grafanaStatus.state === 'scanning') pollGrafanaStatus(0);
     } catch (error) {
         console.warn('Grafana status unavailable:', error);
         grafanaStatus = null;
@@ -58,12 +62,226 @@ async function loadTableUsage(database, table) {
         const response = await fetch(`/api/grafana/usage/${encodeURIComponent(database)}/${encodeURIComponent(table)}`);
         if (!response.ok) return null;
         const payload = await response.json();
+        syncGrafanaState(payload);
         // The server withholds the payload unless the scan completed.
         return payload.state === 'ok' ? payload.usage : null;
     } catch (error) {
         console.warn('Grafana usage unavailable:', error);
         return null;
     }
+}
+
+// syncGrafanaState refreshes the cached status from any endpoint that carries
+// one. loadGrafanaStatus runs once at boot, and a first scan of a few hundred
+// dashboards easily outlives it — without this the cached state stays
+// "scanning" for the life of the page and every view gated on it says the data
+// is not ready long after it is.
+function syncGrafanaState(payload) {
+    if (!payload || !payload.state || !grafanaStatus) return;
+    if (payload.state === grafanaStatus.state) return;
+    grafanaStatus = { ...grafanaStatus, ...payload };
+    delete grafanaStatus.usage;
+    delete grafanaStatus.report;
+}
+
+// pollGrafanaStatus watches a scan through to completion so the UI recovers on
+// its own. Bounded: a scan that has not finished in a few minutes is a problem
+// to report, not to keep polling.
+let grafanaPollTimer = null;
+function pollGrafanaStatus(attempt) {
+    if (grafanaPollTimer || attempt > 40) return;
+    grafanaPollTimer = setTimeout(async () => {
+        grafanaPollTimer = null;
+        try {
+            const response = await fetch('/api/grafana/status');
+            if (!response.ok) return;
+            const payload = await response.json();
+            const changed = !grafanaStatus || payload.state !== grafanaStatus.state;
+            grafanaStatus = payload;
+            if (payload.state === 'scanning') {
+                pollGrafanaStatus(attempt + 1);
+            } else if (changed) {
+                // The scan landed: re-fetch this table's usage and redraw.
+                if (selectedDatabase && selectedTable) {
+                    currentUsage = await loadTableUsage(selectedDatabase, selectedTable);
+                }
+                renderDashboardUsage();
+                if (currentActiveSection === 'unused-columns') loadUnusedReport();
+            }
+        } catch (error) {
+            console.warn('Grafana status poll failed:', error);
+        }
+    }, 5000);
+}
+
+// ─── Dashboard-usage diagram ─────────────────────────────────────────────
+//
+// The bipartite view of the same evidence the inspector lists per column:
+// the selected table on the left, the Grafana dashboards reading it on the
+// right, one line per (column, panel) pair. Like the unused-columns report it
+// exists in the DOM only when Grafana is configured.
+
+let dashboardUsagePanzoom = null;
+let dashboardHideUnconnected = false;
+// null means "let the renderer decide from the panel count". Once the user
+// touches the toggle their choice sticks for the session, because a control that
+// silently re-decides itself on the next table reads as broken.
+let dashboardPanelMode = null;
+
+function buildDashboardUsageSection() {
+    if (!grafanaVisible() || document.getElementById('dashboard-usage-section')) return;
+
+    const tabs = document.querySelector('.section-tabs');
+    const container = document.querySelector('.schema-sections');
+    if (!tabs || !container) return;
+
+    const tab = document.createElement('button');
+    tab.className = 'section-tab';
+    tab.dataset.section = 'dashboard-usage';
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-chart-line';
+    tab.appendChild(icon);
+    tab.appendChild(document.createTextNode(' Dashboards'));
+    tab.addEventListener('click', () => switchSection('dashboard-usage'));
+    tabs.appendChild(tab);
+
+    const section = document.createElement('div');
+    section.className = 'schema-container hidden';
+    section.id = 'dashboard-usage-section';
+    section.innerHTML = `
+        <div class="section-header">
+            <div class="section-header-text">
+                <h3>Dashboard usage</h3>
+                <p class="section-description">Which Grafana dashboards read this table, and which column each panel touches.</p>
+            </div>
+            <div class="view-controls">
+                <label class="du-toggle" title="Show each panel as its own row instead of one row per dashboard. Off by default above a dozen panels, where the full picture does not fit.">
+                    <input type="checkbox" id="du-panel-mode"> panels
+                </label>
+                <label class="du-toggle" title="Hide columns no query names. Columns kept alive only through a materialized view are hidden too — they carry no line.">
+                    <input type="checkbox" id="du-hide-unconnected"> read only
+                </label>
+                <button id="dashboards-zoom-out-btn" title="Zoom out"><i>−</i></button>
+                <button id="dashboards-reset-zoom-btn" title="Reset zoom"><i>⤢</i></button>
+                <button id="dashboards-zoom-in-btn" title="Zoom in"><i>+</i></button>
+            </div>
+        </div>
+        <p id="dashboards-stats" class="du-stats" hidden></p>
+        <div class="diagram-scroll-area" id="dashboards-scroll">
+            <div id="dashboards-diagram" class="diagram-canvas"></div>
+        </div>
+    `;
+    container.appendChild(section);
+
+    section.querySelector('#du-hide-unconnected').addEventListener('change', (event) => {
+        dashboardHideUnconnected = event.target.checked;
+        renderDashboardUsage();
+    });
+    section.querySelector('#du-panel-mode').addEventListener('change', (event) => {
+        dashboardPanelMode = event.target.checked;
+        renderDashboardUsage();
+    });
+    section.querySelector('#dashboards-zoom-in-btn')
+        .addEventListener('click', () => dashboardUsagePanzoom && dashboardUsagePanzoom.zoomIn());
+    section.querySelector('#dashboards-zoom-out-btn')
+        .addEventListener('click', () => dashboardUsagePanzoom && dashboardUsagePanzoom.zoomOut());
+    section.querySelector('#dashboards-reset-zoom-btn')
+        .addEventListener('click', () => dashboardUsagePanzoom && dashboardUsagePanzoom.reset());
+}
+
+// renderDashboardUsage draws from currentUsage, which loadTableDetails already
+// fetched. It is a no-op until both the section and a selection exist, so it is
+// safe to call from the selection path, the Grafana-status path and the tab.
+function renderDashboardUsage() {
+    const container = document.getElementById('dashboards-diagram');
+    if (!container || !window.SchemaDiagram) return;
+
+    dashboardUsagePanzoom = null;
+
+    if (!selectedDatabase || !selectedTable) {
+        renderDiagramNotice(container, 'Select a table to see the dashboards that read it.');
+        return;
+    }
+    // Without a completed scan there is no evidence, only the absence of it —
+    // an empty diagram here would read as "no dashboard uses this table".
+    if (!grafanaReady()) {
+        if (grafanaStatus && grafanaStatus.state === 'scanning') pollGrafanaStatus(0);
+        const detail = grafanaStatus && grafanaStatus.state === 'scanning'
+            ? 'Scanning Grafana dashboards — this view will fill in on its own when the scan lands.'
+            : `Grafana is configured but unreachable, so dashboard usage is unknown — not absent: ${
+                (grafanaStatus && (grafanaStatus.error || grafanaStatus.reason)) || 'unknown error'}`;
+        renderDiagramNotice(container, detail);
+        return;
+    }
+    if (!currentUsage) {
+        renderDiagramNotice(container, 'No dashboard usage was returned for this table.');
+        return;
+    }
+
+    const result = window.SchemaDiagram.renderDashboardUsage(container, currentUsage, {
+        engineType: classifyEngine(currentUsage.engine),
+        hideUnconnected: dashboardHideUnconnected,
+        panelMode: dashboardPanelMode,
+        // The renderer never builds a URL: panelURL owns the scheme check, so a
+        // dashboard_url out of Grafana cannot become a javascript: navigation.
+        onOpen: (ref) => {
+            const url = panelURL(ref);
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+        },
+    });
+    dashboardUsagePanzoom = result ? result.panzoom : null;
+    // Fitting the whole picture into the pane is right until the picture is far
+    // taller than it is wide — per-panel rows on a heavily-read table reach five
+    // times the pane's height, and fitting that means an 18% scale nobody can
+    // read. Past the threshold the canvas goes back to its natural aspect and
+    // the pane scrolls, which at least stays legible.
+    container.classList.toggle('tall',
+        Boolean(result && result.height > result.width * 1.6));
+    renderDashboardStats(result && result.stats);
+}
+
+// renderDashboardStats states in words what the picture cannot be counted off.
+// A table read by 26 dashboards draws several hundred lines; the totals, and
+// which of them are not drawn, have to be legible regardless.
+function renderDashboardStats(stats) {
+    const target = document.getElementById('dashboards-stats');
+    const toggle = document.getElementById('du-panel-mode');
+    if (!target) return;
+    if (!stats) {
+        target.hidden = true;
+        return;
+    }
+    if (toggle) toggle.checked = stats.panelMode;
+
+    const parts = [
+        `${stats.dashboards} dashboard${stats.dashboards === 1 ? '' : 's'}`,
+        `${stats.panels} panel${stats.panels === 1 ? '' : 's'}`,
+        `${stats.columnsNamed} of ${stats.columnsTotal} columns named by a query`,
+    ];
+    // Stated separately and never drawn as a line: these columns are in use, but
+    // what keeps them alive is a view reading the whole table, not a dashboard
+    // naming them. Leaving the count out would invite exactly the wrong
+    // conclusion from the absence of a line.
+    if (stats.columnsLineage) {
+        parts.push(`${stats.columnsLineage} more kept alive through a materialized view`);
+    }
+    if (stats.hidden > 0) {
+        parts.push(`${stats.hidden} dashboard${stats.hidden === 1 ? '' : 's'} not drawn`);
+    }
+    if (!stats.panelMode && stats.autoPanelMode && stats.panels > stats.dashboards) {
+        parts.push('grouped by dashboard — tick "panels" for per-panel rows');
+    }
+    target.textContent = parts.join(' · ');
+    target.hidden = false;
+}
+
+function renderDiagramNotice(container, message) {
+    renderDashboardStats(null);
+    container.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'diagram-empty';
+    note.textContent = message;
+    container.appendChild(note);
 }
 
 // ─── Unused-columns report ───────────────────────────────────────────────
@@ -632,14 +850,16 @@ function renderBreadcrumb({ database, table, engine }) {
 }
 
 // ─── Section switching ───────────────────────────────────────────────────
-// sectionElements maps a section name to its container. The unused-columns
-// entry only exists when Grafana is configured, so an absent key is normal
-// rather than an error.
+// sectionElements maps a section name to its container. The dashboard-usage and
+// unused-columns entries only exist when Grafana is configured, so an absent key
+// is normal rather than an error.
 function sectionElements() {
     const sections = {
         'data-flow': dataFlowSection,
         'relationships': relationshipsSection,
     };
+    const dashboards = document.getElementById('dashboard-usage-section');
+    if (dashboards) sections['dashboard-usage'] = dashboards;
     const unused = document.getElementById('unused-columns-section');
     if (unused) sections['unused-columns'] = unused;
     return sections;
@@ -665,6 +885,7 @@ function switchSection(sectionName) {
     // been created yet — the unused-columns tab is added after an async fetch.
     if (resolved === sectionName) localStorage.setItem('activeSection', sectionName);
     if (resolved === 'unused-columns') loadUnusedReport();
+    if (resolved === 'dashboard-usage') renderDashboardUsage();
 }
 
 // restoreActiveSection re-applies the remembered section. It runs once at load
@@ -742,6 +963,7 @@ async function loadTableDetails(database, table) {
         const details = await response.json();
         currentUsage = await loadTableUsage(database, table);
         renderTableDetails(details, currentUsage);
+        renderDashboardUsage();
         renderBreadcrumb({ database: details.database, table: details.name, engine: details.engine });
     } catch (error) {
         console.error('Error loading table details:', error);
@@ -1020,6 +1242,9 @@ function usageEvidence(entry) {
 // panelURL deep-links to the panel, refusing anything that is not an http(s)
 // URL so a hostile dashboard record cannot inject a javascript: href.
 function panelURL(ref) {
+    // Directory mode has no base URL to build one from, and an empty string
+    // resolves against window.location — a link back to this app.
+    if (!ref.dashboard_url) return null;
     let url;
     try {
         url = new URL(ref.dashboard_url, window.location.origin);
@@ -1047,16 +1272,29 @@ function showError(message) {
 // ─── Export HTML ─────────────────────────────────────────────────────────
 // Embed the rendered SVG directly so the exported file has zero external
 // dependencies (no CDN, no Mermaid, no Dagre).
+// Human-readable names for the exported page's subtitle and nothing else.
+const SECTION_TITLES = {
+    'data-flow': 'Data Flow',
+    'relationships': 'Column Relationships',
+    'dashboard-usage': 'Grafana Dashboard Usage',
+};
+
 function exportHtml() {
     if (!selectedDatabase || !selectedTable) {
         showError('No table selected.');
         return;
     }
     // Only the diagram sections have anything to export; the report is a table.
-    const diagrams = { 'data-flow': dataflowDiagram, 'relationships': relationshipsDiagram };
+    const diagrams = {
+        'data-flow': dataflowDiagram,
+        'relationships': relationshipsDiagram,
+        // Created only when Grafana is configured, hence the lookup rather than
+        // a module-level const.
+        'dashboard-usage': document.getElementById('dashboards-diagram'),
+    };
     const sourceDiagram = diagrams[currentActiveSection];
     if (!sourceDiagram) {
-        showError('Export HTML applies to the Data flow and Relationships diagrams.');
+        showError('Export HTML applies to the diagram views, not to the unused-columns report.');
         return;
     }
     const svg = sourceDiagram.querySelector('svg');
@@ -1073,7 +1311,9 @@ function exportHtml() {
 
     const wrapStyles = `
 :root { --accent:#3b5bdb; --border:#e8e8ea; --bg:#fafafa; --text:#0b0d12; --muted:#6b7280; --faint:#9aa0aa;
-  --t-mergetree-fg:#1f6feb; --t-replicated-fg:#d97706; --t-distributed-fg:#0d9488; --t-mview-fg:#a855f7; --t-dictionary-fg:#b48a00; }
+  --t-mergetree-fg:#1f6feb; --t-replicated-fg:#d97706; --t-distributed-fg:#0d9488; --t-mview-fg:#a855f7; --t-dictionary-fg:#b48a00;
+  --grafana-fg:#f46800;
+  --v-used-fg:#0f7b4f; --v-unused-fg:#b3261e; --v-unknown-fg:#8a6d0b; --v-nocoverage-fg:#9aa0aa; }
 *, *::before, *::after { box-sizing: border-box; }
 body { margin:0; font-family:'JetBrains Mono', ui-monospace, monospace; background:var(--bg); color:var(--text); }
 header { padding:14px 20px; border-bottom:1px solid var(--border); background:#fff; }
@@ -1098,7 +1338,7 @@ ${commonDiagramCss()}
 <body>
 <header>
   <h1>${escapeHtml(selectedDatabase)} / ${escapeHtml(selectedTable)}</h1>
-  <div class="crumb">schemaflow · ${currentActiveSection === 'data-flow' ? 'Data Flow' : 'Column Relationships'}</div>
+  <div class="crumb">schemaflow · ${escapeHtml(SECTION_TITLES[currentActiveSection] || currentActiveSection)}</div>
 </header>
 <div class="canvas">${new XMLSerializer().serializeToString(clone)}</div>
 </body>
@@ -1142,11 +1382,36 @@ function commonDiagramCss() {
 .rel-engine { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
 .rel-divider { stroke:var(--border); stroke-width:.5; }
 .rel-col-bg { fill:var(--bg); }
+/* An SVG rect with no fill paints black. These are hit targets that are only
+   ever visible on hover, so the live stylesheet makes them transparent —
+   omitting them here turned every column row of an export into a black bar. */
+.rel-col-hit, .du-dash-hit { fill:transparent; }
 .rel-col-name { font: 400 11px 'JetBrains Mono', monospace; fill:var(--text); }
 .rel-col-type { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
 .rel-edge { fill:none; stroke:var(--accent); stroke-opacity:.5; stroke-width:1.4; }
 .rel-edge-label rect { fill:#fff; stroke:var(--border); }
 .rel-edge-label text { font: 500 10px 'JetBrains Mono', monospace; fill:var(--accent); }
+.du-card { fill:#fff; stroke:var(--border); stroke-width:1; }
+.du-rail { fill:var(--grafana-fg); }
+.du-dash-kind { font: 500 9.5px 'JetBrains Mono', monospace; fill:var(--grafana-fg); letter-spacing:.06em; }
+.du-dash-count { font: 400 9.5px 'JetBrains Mono', monospace; fill:var(--muted); }
+.du-dash-title { font: 700 12px 'JetBrains Mono', monospace; fill:var(--text); }
+.du-dash-hit { fill:transparent; }
+.du-panel-name { font: 400 11px 'JetBrains Mono', monospace; fill:var(--text); }
+.du-panel-tag { font: 500 9px 'JetBrains Mono', monospace; fill:var(--muted); }
+.du-panel-tag.derived { fill:var(--accent); }
+.du-panel-tag.heuristic, .du-panel-tag.table-level { fill:var(--v-unknown-fg); }
+.du-edge { fill:none; stroke:var(--grafana-fg); stroke-opacity:.55; stroke-width:1.4; }
+.du-edge.derived { stroke-dasharray:5 3; }
+.du-edge.heuristic { stroke-opacity:.3; stroke-dasharray:2 3; }
+.du-edge.table-level { stroke:var(--v-unknown-fg); stroke-opacity:.45; stroke-dasharray:1 4; }
+.du-more-text { font: italic 400 9.5px 'JetBrains Mono', monospace; fill:var(--faint); }
+.du-col { --dot:var(--v-nocoverage-fg); }
+.du-col.verdict-used { --dot:var(--v-used-fg); }
+.du-col.verdict-unused { --dot:var(--v-unused-fg); }
+.du-col.verdict-unknown { --dot:var(--v-unknown-fg); }
+.du-dot { fill:none; stroke:var(--dot); stroke-width:1.6; }
+.du-col.du-named .du-dot { fill:var(--dot); }
 `;
 }
 
