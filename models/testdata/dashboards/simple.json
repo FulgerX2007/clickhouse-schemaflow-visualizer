@@ -1,0 +1,34 @@
+{
+  "uid": "sales-overview",
+  "title": "Sales Overview",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Orders per minute",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "timeseries",
+          "rawSql": "SELECT toStartOfMinute(created_at) AS t, count() AS orders FROM shop.orders WHERE $__timeFilter(created_at) GROUP BY t ORDER BY t"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Revenue",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawSql": "SELECT sum(amount) AS revenue FROM shop.orders WHERE $__timeFilter(created_at)"
+        }
+      ]
+    }
+  ],
+  "templating": { "list": [] }
+}

@@ -46,13 +46,44 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to ClickHouse: %v", err)
 	}
-	defer clickhouseClient.Close()
+	defer func() { _ = clickhouseClient.Close() }()
+
+	// Load the optional Grafana dashboard source. Unlike ClickHouse, a failure
+	// here is never fatal: the visualizer's core function does not depend on it,
+	// and killing the process over a bad token would take the whole app down for
+	// an add-on feature. The reason is carried into the status endpoint instead.
+	grafanaConfig, grafanaErr := models.LoadGrafanaConfig(os.Getenv, clickhouseConfig.Database)
+	if grafanaErr != nil {
+		log.Printf("Warning: Grafana integration misconfigured: %v", grafanaErr)
+	}
+	grafanaReason := ""
+	if grafanaErr != nil {
+		grafanaReason = grafanaErr.Error()
+	}
+
+	var grafanaSource models.DashboardSource
+	if grafanaConfig.Enabled() {
+		grafanaSource, err = models.NewDashboardSource(grafanaConfig)
+		if err != nil {
+			log.Printf("Warning: Grafana dashboard source unavailable: %v", err)
+			grafanaConfig.Mode = models.GrafanaModeDisabled
+		} else {
+			log.Printf("Grafana dashboard source enabled (mode: %s)", grafanaConfig.Mode)
+		}
+	}
+
+	grafanaIndex := models.NewGrafanaIndex(grafanaConfig, grafanaSource, func() (models.SchemaSnapshot, error) {
+		return models.LoadSchemaSnapshot(clickhouseClient)
+	}, grafanaReason)
+	// Scans in the background: a slow or unreachable Grafana must not delay the
+	// listen call for a feature the rest of the app does not depend on.
+	grafanaIndex.Start()
 
 	// Initialize router
 	router := gin.Default()
 
 	// Create API handlers
-	handler := api.NewHandler(clickhouseClient, clickhouseConfig)
+	handler := api.NewHandler(clickhouseClient, clickhouseConfig, grafanaIndex)
 	handler.RegisterRoutes(router)
 
 	// Serve static files from the frontend directory. The no-cache header tells

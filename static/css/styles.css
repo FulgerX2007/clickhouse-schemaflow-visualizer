@@ -28,6 +28,17 @@
   --t-dictionary-fg:  #b48a00;
   --t-dictionary-bg:  #fbf3d6;
 
+  /* Column-usage verdicts. Only "unused" means safe to drop, so it is the one
+     that reads as an action; the other three are deliberately quieter. */
+  --v-used-fg:        #0f7b4f;
+  --v-used-bg:        #e6f6ee;
+  --v-unused-fg:      #b3261e;
+  --v-unused-bg:      #fdeceb;
+  --v-unknown-fg:     #8a6d0b;
+  --v-unknown-bg:     #fbf3d6;
+  --v-nocoverage-fg:  #6b7280;
+  --v-nocoverage-bg:  #f1f2f4;
+
   --status-ok: #10b981;
 
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -1389,3 +1400,150 @@ footer {
   .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
   body { overflow: auto; }
 }
+
+/* ─── Column usage (Grafana dashboards) ─────────────────────────────────── */
+
+.usage-summary { color: var(--v-unused-fg); }
+
+.usage-banner {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.usage-banner.error   { background: var(--v-unknown-bg); color: var(--v-unknown-fg); }
+.usage-banner.scanning { background: var(--v-nocoverage-bg); color: var(--v-nocoverage-fg); }
+
+.columns-table th.usage-header { text-align: right; white-space: nowrap; }
+.columns-table td.usage-cell   { text-align: right; vertical-align: top; white-space: nowrap; }
+.columns-table td.usage-cell.expandable { cursor: pointer; }
+
+.verdict-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.verdict-badge.verdict-used        { background: var(--v-used-bg);       color: var(--v-used-fg); }
+.verdict-badge.verdict-unused      { background: var(--v-unused-bg);     color: var(--v-unused-fg); }
+.verdict-badge.verdict-unknown     { background: var(--v-unknown-bg);    color: var(--v-unknown-fg); }
+.verdict-badge.verdict-no-coverage { background: var(--v-nocoverage-bg); color: var(--v-nocoverage-fg); }
+
+.usage-cell.expanded .verdict-badge { outline: 1px solid currentColor; }
+
+.usage-evidence-row > td { padding: 0 0 8px 0; background: var(--bg); }
+
+ul.usage-evidence {
+  margin: 0;
+  padding: 4px 8px 4px 18px;
+  list-style: none;
+  font-size: 11px;
+}
+ul.usage-evidence li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+ul.usage-evidence li:last-child { border-bottom: none; }
+
+.usage-dashboard { font-weight: 600; color: var(--accent); text-decoration: none; }
+a.usage-dashboard:hover { text-decoration: underline; }
+.usage-panel { color: var(--muted); }
+
+.usage-via, .usage-heuristic {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  background: var(--v-nocoverage-bg);
+  color: var(--v-nocoverage-fg);
+}
+.usage-heuristic { background: var(--v-unknown-bg); color: var(--v-unknown-fg); }
+
+.usage-snippet {
+  display: block;
+  margin-top: 3px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--v-nocoverage-bg);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.usage-reason { margin: 4px 0 4px 18px; font-size: 11px; color: var(--muted); }
+
+/* ─── Unused-columns report ─────────────────────────────────────────────── */
+
+.unused-scroll-area { overflow: auto; height: 100%; padding: 12px 14px; }
+.unused-report { font-size: 11px; }
+
+.unused-totals { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.unused-totals .verdict-badge { padding: 3px 9px; font-size: 11px; }
+
+.unused-legend {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--v-unused-fg);
+  background: var(--v-unused-bg);
+  color: var(--v-unused-fg);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.unused-caveat {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.unused-empty { color: var(--muted); padding: 12px 0; }
+
+.unused-table { width: 100%; border-collapse: collapse; }
+.unused-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+  text-align: left;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.unused-table th.sortable { cursor: pointer; user-select: none; }
+.unused-table th.sortable:hover { color: var(--accent); }
+.unused-table th.asc::after  { content: ' ▲'; font-size: 8px; color: var(--accent); }
+.unused-table th.desc::after { content: ' ▼'; font-size: 8px; color: var(--accent); }
+
+.unused-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.unused-table td.muted { color: var(--muted); }
+.unused-table tr.unused-row { cursor: pointer; }
+.unused-table tr.unused-row:hover { background: var(--bg); }
+
+#unused-columns-section .view-controls select {
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+ul.usage-panels {
+  margin: 3px 0 0;
+  padding-left: 12px;
+  list-style: none;
+  border-left: 1px solid var(--border);
+}
+ul.usage-panels > li { padding: 2px 0; }

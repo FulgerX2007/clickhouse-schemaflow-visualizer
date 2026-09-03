@@ -1,8 +1,9 @@
 module github.com/fulgerX2007/clickhouse-schemaflow-visualizer
 
-go 1.26.3
+go 1.27.0
 
 require (
+	github.com/AfterShip/clickhouse-sql-parser v0.5.6
 	github.com/ClickHouse/clickhouse-go/v2 v2.34.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/joho/godotenv v1.5.1

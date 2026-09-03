@@ -42,7 +42,25 @@ services:
     container_name: clickhouse-schemaflow-visualizer
     ports:
       - "8080:8080"
-    env_file: ".env"
+    # Optional, and only for settings the test stack does not pin below —
+    # GRAFANA_* and GIN_MODE. Marked not required so the stack still comes up
+    # for a contributor who has no .env at all.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # The test stack is self-contained. These override anything .env holds,
+      # because .env normally points at a real ClickHouse and pointing this
+      # container at production would be both wrong and dangerous. The
+      # credentials match the clickhouse service above.
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=default
+      - CLICKHOUSE_DATABASE=test_engines
+      - CLICKHOUSE_SECURE=false
+      - CLICKHOUSE_SKIP_VERIFY=false
+      - SERVER_ADDR=:8080
     restart: unless-stopped
     depends_on:
       - clickhouse

@@ -34,6 +34,8 @@ An open-source web application for visualizing ClickHouse table relationships. I
 - 🔦 Click a column in the Relationships view to highlight its full data path through the pipeline
 - ⌨️ Live sidebar filter and a `Ctrl+K` / `⌘K` command palette to jump to any table, column, or engine
 - 📈 Optional metadata overlay showing row counts and on-disk size per table
+- 🧹 **Unused columns** view — which columns no Grafana dashboard reads, so dead schema can be found and dropped (optional; off unless Grafana is configured)
+- 🔗 Per-column dashboard lineage in the inspector: which dashboard and panel reads each column, with the SQL that proves it
 - 💾 Export the current diagram as a standalone HTML file (self-contained, no external assets)
 - 🔒 TLS connection to ClickHouse with optional skip-verify and custom CA / client certificates
 - 📱 Responsive layout that works on desktop and tablet viewports
@@ -48,7 +50,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 
 - Docker and Docker Compose
 - ClickHouse server
-- Go 1.26+ (only required if building from source — Docker users can skip)
+- Go 1.27+ (only required if building from source — Docker users can skip)
 
 ## 🚀 Installation and Setup
 
@@ -85,7 +87,7 @@ An open-source web application for visualizing ClickHouse table relationships. I
 
 ### Manual Setup
 
-Requires Go 1.26 or newer (see `go.mod`).
+Requires Go 1.27 or newer (see `go.mod`).
 
 1. Clone the repository:
    ```bash
@@ -113,6 +115,18 @@ Requires Go 1.26 or newer (see `go.mod`).
    # Web Interface Settings
    SERVER_ADDR=:8080
    GIN_MODE=debug
+
+   # Grafana column usage (optional — leave unset to disable the feature entirely)
+   # Either the API…
+   # GRAFANA_URL=https://grafana.example.com
+   # GRAFANA_TOKEN=              # service account, Viewer role is enough
+   # …or a directory of dashboard JSON, which needs no credentials:
+   # GRAFANA_DASHBOARDS_DIR=/etc/grafana/dashboards
+   # GRAFANA_SKIP_VERIFY=false
+   # GRAFANA_TIMEOUT=30s
+   # GRAFANA_CACHE_TTL=15m
+   # GRAFANA_DEFAULT_DATABASE=   # defaults to CLICKHOUSE_DATABASE
+   # GRAFANA_SNIPPET_CHARS=200   # 0 omits SQL snippets from responses
    ```
 
 3. Install Go dependencies:
@@ -126,6 +140,40 @@ Requires Go 1.26 or newer (see `go.mod`).
    ```
 
 5. Access the web interface at http://localhost:8080
+
+## 🧹 Finding unused columns
+
+Point the app at Grafana and it will tell you which ClickHouse columns nobody reads.
+
+Set either `GRAFANA_URL` + `GRAFANA_TOKEN` (a Viewer service account) or
+`GRAFANA_DASHBOARDS_DIR` (a directory of dashboard JSON — no credentials needed). An
+**Unused columns** tab then appears, and every column in the table inspector gets a
+verdict. **With neither set, the feature is off and the UI carries no trace of it.**
+
+Usage is traced through ClickHouse's own lineage, which is the part that matters: a
+dashboard querying a `Distributed` wrapper marks the local table behind it, and a
+dashboard reading a materialized view's destination marks every source column that view
+reads. A column can be in use without any dashboard naming its table.
+
+Columns get one of four verdicts, and **only one of them means safe to drop**:
+
+| Verdict | Meaning | Safe to drop |
+|---|---|---|
+| `used` | a dashboard reads it, lineage reaches it, or it is part of a primary/sorting/partition key | no |
+| **`unused`** | the table is read, every query reading it was fully understood, and none name this column | **yes** |
+| `unknown` | the table is read, but a query touching it used `SELECT *`, a variable column, or could not be parsed | no |
+| `no-coverage` | nothing observed reads the table at all — which is not evidence its columns are dead | no |
+
+Three deliberate refusals: a key column is never reported unused, because
+`ALTER TABLE … DROP COLUMN` refuses to remove one; tables whose columns are not droppable
+at all — `Distributed`, `Merge`, `MaterializedView`, `View` and `Dictionary` — are left out
+entirely, since the question belongs to the tables underneath them; and if Grafana is
+switched off, still scanning or unreachable, **every** column reads `no-coverage` rather
+than `unused` — an absent scan looks exactly like a Grafana in which nothing is used.
+
+`unused` also means *unused by Grafana*. Ad-hoc queries, applications and scheduled jobs
+are invisible to it, and the report says so in its own caveats. Cross-check before
+dropping anything.
 
 ## 📖 Usage
 
@@ -149,15 +197,15 @@ Requires Go 1.26 or newer (see `go.mod`).
 
 ## 🔧 How It Works
 
-The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers everything once and caches it in memory; click the sidebar **↻** button to refresh.
+The application is read-only: it queries ClickHouse system tables and never writes anything back. On first request to `/api/databases` it discovers every database, table, and relationship in a single pass over `system.tables` and caches the result in memory for the lifetime of the process. The sidebar **↻** button re-renders the tree from that cache, so restart the app to pick up schema changes made after it started.
 
 Relationship discovery is engine-aware:
 - `MergeTree` / `Replicated*MergeTree` — leaf tables; show as the source or sink of a flow.
 - `Distributed` — the `Distributed(...)` engine arguments are parsed to find the underlying local cluster table; the visualizer draws an edge from the local table to its Distributed wrapper.
 - `MaterializedView` — the MV's stored `SELECT` is parsed to find both the source table (`FROM ...`) and the per-column transformation expressions; an edge is drawn from each referenced source column to the corresponding target column, with the expression rendered as the edge label.
-- `Dictionary` — the dictionary's `SOURCE(...)` clause is inspected to link the dictionary back to its underlying table.
+- `Dictionary` — the `loading_dependencies_database` / `loading_dependencies_table` columns of `system.tables` are used to link the dictionary back to its underlying table.
 
-Node IDs in the diagrams use CityHash32 of the fully qualified table name to stay deterministic and collision-resistant across reloads, and column names / expressions are sanitized so anything containing reserved characters still renders.
+Nodes are identified by their fully qualified `database.table` name, so a diagram is stable across reloads. The API returns plain JSON — nodes, edges, columns, and expressions — and the browser builds the SVG from it directly, so table and column names carrying reserved characters need no escaping to render.
 
 ## 🧪 Local test stack
 
@@ -190,9 +238,10 @@ clickhouse-schemaflow-visualizer/
 ├── assets/                           # Project assets
 │   └── screenshots/                  # Screenshots used in this README
 ├── config/                           # Configuration handling
-│   └── config.go                     # Environment configuration loader
+│   └── config.go                     # Environment configuration loader (unused — main.go reads the env directly)
 ├── models/                           # Domain logic
-│   └── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery, diagram model
+│   ├── clickhouse.go                 # ClickHouse client, engine-aware relationship discovery
+│   └── graph.go                      # Graph payloads returned by /api/dataflow, /api/relationships, /api/columns
 ├── scripts/                          # Helper SQL and packaging scripts
 │   └── clickhouse_test_engines.sql   # Seed schema for the local test stack
 ├── static/                           # Embedded frontend

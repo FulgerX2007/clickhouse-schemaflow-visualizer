@@ -1,0 +1,109 @@
+{
+  "uid": "panel-shapes",
+  "title": "Panel Shapes",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "name": "period",
+        "type": "query",
+        "query": "SELECT DISTINCT period FROM meta.periods",
+        "current": { "value": "6min" },
+        "options": [{ "value": "6min" }, { "value": "1h" }]
+      },
+      {
+        "name": "objectquery",
+        "type": "query",
+        "query": { "query": "SELECT name FROM meta.hosts", "refId": "X" },
+        "current": { "value": ["a", "b"] }
+      },
+      {
+        "name": "region",
+        "type": "custom",
+        "query": "eu, us ,apac"
+      },
+      {
+        "name": "step",
+        "type": "interval",
+        "query": "1m,5m"
+      },
+      {
+        "name": "everything",
+        "type": "query",
+        "query": "SELECT x FROM meta.x",
+        "current": { "value": "$__all" }
+      },
+      { "name": "", "type": "query", "query": "SELECT ignored FROM nowhere" }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Collapsed",
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 2,
+          "type": "table",
+          "title": "Nested in a row",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch" },
+          "targets": [
+            { "refId": "A", "rawSql": "SELECT nested_col FROM db.nested" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Target inherits the panel datasource",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "ch" },
+      "targets": [
+        { "refId": "A", "rawSql": "SELECT inherited_col FROM db.inherited" },
+        { "refId": "B", "rawSql": "SELECT second_col FROM db.inherited", "hide": true }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Reuses panel 3",
+      "datasource": { "type": "datasource", "uid": "-- Dashboard --" },
+      "targets": [{ "refId": "A", "panelId": 3 }]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Reuses a panel that is not here",
+      "datasource": { "type": "datasource", "uid": "-- Dashboard --" },
+      "targets": [{ "refId": "A", "panelId": 999 }]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Infinity datasource",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "inf" },
+      "targets": [{ "refId": "A", "url": "https://example.com/x.json", "rawSql": "SELECT should_be_ignored FROM nowhere" }]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Postgres, a different database entirely",
+      "datasource": { "type": "postgres", "uid": "pg" },
+      "targets": [{ "refId": "A", "rawSql": "SELECT pg_col FROM public.orders" }]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Legacy string datasource",
+      "datasource": "ClickHouse",
+      "targets": [{ "refId": "A", "rawSql": "SELECT legacy_col FROM db.legacy" }]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "No datasource anywhere",
+      "targets": [{ "refId": "A", "rawSql": "SELECT orphan_col FROM db.orphan" }]
+    }
+  ]
+}

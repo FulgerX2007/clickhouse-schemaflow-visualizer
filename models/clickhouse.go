@@ -210,7 +210,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tables: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tables []TableRelation
 	if TableMetadata == nil {
@@ -456,7 +456,7 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 	if err != nil {
 		return nil, fmt.Errorf("failed to query columns: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var columns []ColumnInfo
 	for rows.Next() {

@@ -3,3 +3,4 @@
 memory-bank/
 dist/
 *.log
+.playwright-mcp/
