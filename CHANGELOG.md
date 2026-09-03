@@ -9,6 +9,27 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-03
+
+### Added
+
+- **Dashboards view.** A third diagram for the selected table, wiring its columns by line
+  to the Grafana panels that read them, with the lineage hop marked on each edge. It adds
+  no endpoint — it is a second reading of the payload the inspector already fetches.
+
+  Drawn for a schema read by hundreds of dashboards rather than for a test fixture: a
+  table read by 26 dashboards across 89 panels is 3852px tall one row per panel, which
+  the viewBox then scales to a fifth of legible size and reads as an empty tab. Above
+  `DU_AUTO_PANEL_LIMIT` panels it collapses to one row per dashboard, caps at
+  `DU_MAX_ROWS` while stating what it dropped, and fades edges past `DU_DENSE_EDGES`.
+  Totals are printed above the diagram because a picture at that size cannot be counted
+  off.
+
+  Lineage claims are drawn according to their precision. A `distributed:` reference names
+  a real column and earns its own line; an `mv:` reference is a claim about the table —
+  drawn per-column it produced 39 identical lines out of a 40-column table — so it is one
+  line off the table header with the affected count stated in words.
+
 ### Fixed
 
 - **A single request could kill the server process.** `simplifyColumnType`
@@ -32,6 +53,84 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
   `commonDiagramCss()` in `static/js/app.js` carried `.rel-col-bg` but not
   `.rel-col-hit`, and an SVG `rect` with no `fill` paints black. The live stylesheet
   makes those hit targets transparent; the exported copy did not.
+
+### Removed
+
+- **`config/config.go`.** A second environment loader that nothing imported — `main.go`
+  builds `models.Config` itself — carrying a `GetClickHouseDSN()` that interpolated the
+  password into a connection URL. Dead code that formats a credential is a leak waiting
+  for its first caller. `config/` now holds only `clickhouse-config.xml`, which the local
+  test stack uses.
+
+### Security
+
+Findings from an audit of the whole codebase. No exploited vulnerability is known; these
+close the gaps the audit found.
+
+- **`POST /api/grafana/refresh` could be made to scan without limit.** The TTL debounce
+  read `scannedAt`, released the lock, then scanned — and `scannedAt` is only written when
+  a scan *finishes*. During the first scan every caller therefore read a zero timestamp,
+  passed the check and started its own: twenty concurrent requests bought twenty full
+  scans, each one HTTP request per dashboard against Grafana plus a full schema read
+  against ClickHouse. The endpoint has no authentication and needs no CSRF token, so any
+  page an operator visited could fire it cross-origin. A scan slot is now claimed under
+  the write lock, so one runs at a time and everyone else is told they were debounced.
+  Covered by `TestGrafanaIndexConcurrentRefreshScansOnce`.
+
+- **The database allowlist did not hold on the URL.** `AllowedDatabase` (formerly
+  `allowedDatabase`) was applied when the sidebar was built and nowhere else, so
+  `GET /api/table/system/query_log` — and the `dataflow` and `relationships` equivalents —
+  answered for the databases the sidebar hides. They now return 404 before touching
+  ClickHouse. Covered by `TestTableEndpointsRefuseHiddenDatabases`.
+
+- **500 responses carried the raw error.** A ClickHouse failure names the host, port and
+  user it failed against, and the API is unauthenticated. The error is now logged and the
+  response carries a fixed message.
+
+- **The server had no timeouts.** `router.Run` leaves every `http.Server` timeout at zero,
+  so a client that dribbles out a request header holds a goroutine indefinitely. The
+  server is now built explicitly with read, read-header, write and idle timeouts.
+
+- **Security headers on every response.** A Content-Security-Policy that allows scripts
+  only from this origin, plus `X-Content-Type-Options`, `X-Frame-Options` and
+  `Referrer-Policy`. Registered before the routes, because Gin applies middleware only to
+  routes declared after the `Use` call — added later it would have covered the static
+  files and missed the entire API.
+
+- **No proxy is trusted by default.** Gin otherwise accepts `X-Forwarded-For` from any
+  peer. The new `TRUSTED_PROXIES` variable names the proxy when there is one.
+
+- **A panic in the dashboard scan no longer ends the process.** The scan runs on its own
+  goroutine and feeds dashboard-authored SQL through a third-party parser; it now recovers
+  and records the failure. (Probing the parser with pathological input — 100k-deep
+  parentheses, 20k-deep nested selects, unclosed groups — did not crash it. This is
+  defence in depth, not a fix for a known crash.)
+
+- **`GRAFANA_URL` is validated.** It must be an absolute `http(s)` URL with a host;
+  anything else is reported at startup instead of failing one request at a time. A plain
+  `http://` URL is allowed — internal Grafanas run without TLS — but the server now warns
+  that the token travels in cleartext.
+
+- **The Docker image no longer runs as root**, and its base moved from `alpine:3.18`,
+  which has been end-of-life since May 2025, to `alpine:3.22`. A new `.dockerignore` keeps
+  `.env`, `.git` and logs out of the build context — `COPY . ./` had been putting a
+  developer's real ClickHouse credentials into the builder layer.
+
+- **`.env.bk` and `.env.local` are no longer tracked**, and `.gitignore` now covers
+  `.env.*` with `.env.example` excepted. Every historical value in both files was checked:
+  no live credential was ever committed. The pattern was the risk.
+
+- **Dependencies bumped** past the advisories that reached imported packages:
+  `golang.org/x/net` 0.47.0 → 0.57.0 (five `x/net/html` advisories, an `idna` one and an
+  HTTP/2 `SETTINGS_MAX_FRAME_SIZE` infinite loop), `golang.org/x/text` 0.31.0 → 0.41.0,
+  `golang.org/x/crypto` 0.45.0 → 0.56.0, `github.com/klauspost/compress` 1.18.0 → 1.18.7.
+  `govulncheck` reported eight vulnerabilities in imported packages before and none after;
+  none were ever reachable from this code.
+
+- **`SECURITY.md` added** — reporting process, supported versions, and the threat model
+  the API's lack of authentication implies. The README now states it too.
+
+## [2.2.0] - 2026-09-03
 
 ### Added
 
@@ -135,82 +234,6 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
   the browser, with no sanitisation layer; and `Dictionary` dependencies come from the
   `loading_dependencies_*` columns, not the `SOURCE(...)` clause. Also corrected the sidebar
   refresh description (the cache is never invalidated) and the project-structure listing.
-
-### Removed
-
-- **`config/config.go`.** A second environment loader that nothing imported — `main.go`
-  builds `models.Config` itself — carrying a `GetClickHouseDSN()` that interpolated the
-  password into a connection URL. Dead code that formats a credential is a leak waiting
-  for its first caller. `config/` now holds only `clickhouse-config.xml`, which the local
-  test stack uses.
-
-### Security
-
-Findings from an audit of the whole codebase. No exploited vulnerability is known; these
-close the gaps the audit found.
-
-- **`POST /api/grafana/refresh` could be made to scan without limit.** The TTL debounce
-  read `scannedAt`, released the lock, then scanned — and `scannedAt` is only written when
-  a scan *finishes*. During the first scan every caller therefore read a zero timestamp,
-  passed the check and started its own: twenty concurrent requests bought twenty full
-  scans, each one HTTP request per dashboard against Grafana plus a full schema read
-  against ClickHouse. The endpoint has no authentication and needs no CSRF token, so any
-  page an operator visited could fire it cross-origin. A scan slot is now claimed under
-  the write lock, so one runs at a time and everyone else is told they were debounced.
-  Covered by `TestGrafanaIndexConcurrentRefreshScansOnce`.
-
-- **The database allowlist did not hold on the URL.** `AllowedDatabase` (formerly
-  `allowedDatabase`) was applied when the sidebar was built and nowhere else, so
-  `GET /api/table/system/query_log` — and the `dataflow` and `relationships` equivalents —
-  answered for the databases the sidebar hides. They now return 404 before touching
-  ClickHouse. Covered by `TestTableEndpointsRefuseHiddenDatabases`.
-
-- **500 responses carried the raw error.** A ClickHouse failure names the host, port and
-  user it failed against, and the API is unauthenticated. The error is now logged and the
-  response carries a fixed message.
-
-- **The server had no timeouts.** `router.Run` leaves every `http.Server` timeout at zero,
-  so a client that dribbles out a request header holds a goroutine indefinitely. The
-  server is now built explicitly with read, read-header, write and idle timeouts.
-
-- **Security headers on every response.** A Content-Security-Policy that allows scripts
-  only from this origin, plus `X-Content-Type-Options`, `X-Frame-Options` and
-  `Referrer-Policy`. Registered before the routes, because Gin applies middleware only to
-  routes declared after the `Use` call — added later it would have covered the static
-  files and missed the entire API.
-
-- **No proxy is trusted by default.** Gin otherwise accepts `X-Forwarded-For` from any
-  peer. The new `TRUSTED_PROXIES` variable names the proxy when there is one.
-
-- **A panic in the dashboard scan no longer ends the process.** The scan runs on its own
-  goroutine and feeds dashboard-authored SQL through a third-party parser; it now recovers
-  and records the failure. (Probing the parser with pathological input — 100k-deep
-  parentheses, 20k-deep nested selects, unclosed groups — did not crash it. This is
-  defence in depth, not a fix for a known crash.)
-
-- **`GRAFANA_URL` is validated.** It must be an absolute `http(s)` URL with a host;
-  anything else is reported at startup instead of failing one request at a time. A plain
-  `http://` URL is allowed — internal Grafanas run without TLS — but the server now warns
-  that the token travels in cleartext.
-
-- **The Docker image no longer runs as root**, and its base moved from `alpine:3.18`,
-  which has been end-of-life since May 2025, to `alpine:3.22`. A new `.dockerignore` keeps
-  `.env`, `.git` and logs out of the build context — `COPY . ./` had been putting a
-  developer's real ClickHouse credentials into the builder layer.
-
-- **`.env.bk` and `.env.local` are no longer tracked**, and `.gitignore` now covers
-  `.env.*` with `.env.example` excepted. Every historical value in both files was checked:
-  no live credential was ever committed. The pattern was the risk.
-
-- **Dependencies bumped** past the advisories that reached imported packages:
-  `golang.org/x/net` 0.47.0 → 0.57.0 (five `x/net/html` advisories, an `idna` one and an
-  HTTP/2 `SETTINGS_MAX_FRAME_SIZE` infinite loop), `golang.org/x/text` 0.31.0 → 0.41.0,
-  `golang.org/x/crypto` 0.45.0 → 0.56.0, `github.com/klauspost/compress` 1.18.0 → 1.18.7.
-  `govulncheck` reported eight vulnerabilities in imported packages before and none after;
-  none were ever reachable from this code.
-
-- **`SECURITY.md` added** — reporting process, supported versions, and the threat model
-  the API's lack of authentication implies. The README now states it too.
 
 ## Released versions
 
