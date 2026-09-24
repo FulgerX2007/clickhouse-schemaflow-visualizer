@@ -205,7 +205,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 
 	log.Println("Querying tables relations")
 	ctx := context.Background()
-	query := "SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
+	query := "SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, dependencies_database, dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tables: %v", err)
@@ -213,6 +213,11 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 	defer func() { _ = rows.Close() }()
 
 	var tables []TableRelation
+	// A view's edges are built after the loop: its source is recorded on the
+	// source table's row, which may come later, and both ends are checked
+	// against TableMetadata, which is complete only once every row is read.
+	var views []pendingView
+	viewSources := make(map[string][]string)
 	if TableMetadata == nil {
 		TableMetadata = make(map[string]TableInfo)
 	}
@@ -222,7 +227,9 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 		database, table := "", ""
 		var loadingDependenciesTable []string
 		var loadingDependenciesDatabase []string
-		if err := rows.Scan(&res.createQuery, &res.engineFull, &res.engine, &database, &table, &loadingDependenciesDatabase, &loadingDependenciesTable, &res.totalRows, &res.totalBytes); err != nil {
+		var dependenciesDatabase []string
+		var dependenciesTable []string
+		if err := rows.Scan(&res.createQuery, &res.engineFull, &res.engine, &database, &table, &loadingDependenciesDatabase, &loadingDependenciesTable, &dependenciesDatabase, &dependenciesTable, &res.totalRows, &res.totalBytes); err != nil {
 			return nil, fmt.Errorf("failed to scan table data: %v", err)
 		}
 
@@ -240,6 +247,14 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 
 		fullTableName := database + "." + table
 		var icon string
+
+		// ClickHouse lists, on a table's row, the views that read from it.
+		for i, dependent := range dependenciesTable {
+			if i < len(dependenciesDatabase) {
+				key := dependenciesDatabase[i] + "." + dependent
+				viewSources[key] = append(viewSources[key], fullTableName)
+			}
+		}
 
 		// Extract the relation from the creation query
 		if res.engine == "MergeTree" { // Local Table
@@ -288,19 +303,15 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 				}
 			}
 		} else if res.engine == "MaterializedView" { // Materialized View
-			queryParts1 := strings.Split(res.createQuery, " ")
-			queryParts2 := strings.Split(res.createQuery, "FROM ")
+			queryParts := strings.Split(res.createQuery, " ")
 			icon = `<i class="fa-solid fa-eye"></i>`
 			DatabasesData[database][table] = generateTableListContent(icon, table, res.totalRows, res.totalBytes)
-			if len(queryParts1) > 3 && len(queryParts2) > 1 {
-				mvTable := queryParts1[3]
-				dstTable := queryParts1[5]
-				queryParts3 := strings.Split(queryParts2[1], " ")
-				srcTable := queryParts3[0]
-
-				tables = append(tables, TableRelation{DependsOnTable: srcTable, Table: mvTable, Icon: icon})
-				tables = append(tables, TableRelation{DependsOnTable: mvTable, Table: dstTable, Icon: icon})
+			view := pendingView{Name: fullTableName, Icon: icon}
+			// "CREATE MATERIALIZED VIEW db.mv TO db.dst ..."
+			if len(queryParts) > 5 && queryParts[4] == "TO" {
+				view.Target = queryParts[5]
 			}
+			views = append(views, view)
 		} else {
 			// Default case for other engines
 			icon = `<i class="fa-solid fa-table"></i>`
@@ -323,9 +334,69 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 		return nil, fmt.Errorf("error iterating table rows: %v", err)
 	}
 
+	tables = append(tables, viewRelations(views, viewSources, TableMetadata)...)
+
 	TableRelations = tables
 
 	return tables, nil
+}
+
+// pendingView is a materialized view whose edges wait for the whole of
+// system.tables to be read.
+type pendingView struct {
+	Name   string // db.view
+	Target string // db.table from "TO db.table"; empty for a view with an inner table
+	Icon   string
+}
+
+// viewRelations builds the source → view and view → target edges.
+//
+// Sources come from ClickHouse's dependencies columns, not from the SELECT:
+// the first "FROM " of "SELECT ... FROM (SELECT ... FROM db.src JOIN ...)" is
+// followed by "(SELECT", which used to become a node of that name. Every end
+// must be a table in known, so a name the DDL split misreads, or one in a
+// hidden database, is dropped rather than drawn as a node nothing can open.
+func viewRelations(views []pendingView, sources map[string][]string, known map[string]TableInfo) []TableRelation {
+	var out []TableRelation
+	for _, v := range views {
+		edges := 0
+		for _, src := range sources[v.Name] {
+			if _, ok := known[src]; !ok {
+				continue
+			}
+			out = append(out, TableRelation{DependsOnTable: src, Table: v.Name, Icon: v.Icon})
+			edges++
+		}
+		if v.Target != "" {
+			if _, ok := known[v.Target]; ok {
+				out = append(out, TableRelation{DependsOnTable: v.Name, Table: v.Target, Icon: v.Icon})
+				edges++
+			} else {
+				log.Printf("materialized view %s: target %q is not a known table, edge skipped", v.Name, v.Target)
+			}
+		}
+		if edges == 0 {
+			out = append(out, TableRelation{Table: v.Name, Icon: v.Icon})
+		}
+	}
+	return out
+}
+
+// viewSource returns the table a materialized view reads from, as recorded in
+// relations by viewRelations, or "" when none is known. A Distributed wrapper
+// over the view is also an edge ending at it, pointing the other way, so it
+// is skipped.
+func viewSource(relations []TableRelation, metadata map[string]TableInfo, view string) string {
+	for _, rel := range relations {
+		if rel.Table != view || rel.DependsOnTable == "" {
+			continue
+		}
+		if metadata[rel.DependsOnTable].Engine == "Distributed" {
+			continue
+		}
+		return rel.DependsOnTable
+	}
+	return ""
 }
 
 // AllowedDatabase reports whether a database is one this app will show.

@@ -9,6 +9,21 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-09-24
+
+### Fixed
+
+- **A materialized view reading from a subquery showed a source node named `(SELECT`.**
+  The view's source was the first word after the first `FROM ` in its DDL, so
+  `... FROM (SELECT ... FROM probe_raw.cnxh323 JOIN ...)` produced a node with no
+  database, no engine and nothing to open on click; `FROM probe_raw.newcust)` likewise
+  produced `probe_raw.newcust)`. The Relationships tab read the same text as `SELECT`
+  and drew nothing. Sources now come from ClickHouse's own record — the
+  `dependencies_database`/`dependencies_table` columns of the source table — and an edge
+  end that is not a known table (a misread DDL word, or a table in a hidden database such
+  as `system`) is dropped rather than drawn. On a production schema this corrected 11 of
+  87 views and removed one edge into `system.query_log`.
+
 ## [2.3.0] - 2026-09-03
 
 ### Added
@@ -281,4 +296,5 @@ Pushing the matching `vX.Y.Z` tag is what runs the release: .github/workflows/re
 No workflow runs on push to master or on pull_request, so nothing is checked before the tag.
 -->
 
-[Unreleased]: https://github.com/FulgerX2007/clickhouse-schemaflow-visualizer/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/FulgerX2007/clickhouse-schemaflow-visualizer/compare/v2.3.1...HEAD
+[2.3.1]: https://github.com/FulgerX2007/clickhouse-schemaflow-visualizer/compare/v2.3.0...v2.3.1

@@ -291,9 +291,18 @@ func (c *ClickHouseClient) buildMVRelationshipsGraph(
 ) (RelationshipsGraph, error) {
 	selectQuery, sourceTable, destTable := c.parseViewQuery(createQuery)
 
+	relations, relErr := c.getTablesRelations()
+	fullName := dbName + "." + tableName
+	// The parsed source is the first word after "FROM ", which for a view
+	// selecting from a subquery is "SELECT"; ClickHouse's own record wins.
+	if relErr == nil {
+		if src := viewSource(relations, TableMetadata, fullName); src != "" {
+			sourceTable = src
+		}
+	}
+
 	if destTable == "" {
-		if relations, err := c.getTablesRelations(); err == nil {
-			fullName := dbName + "." + tableName
+		if relErr == nil {
 			for _, rel := range relations {
 				if rel.DependsOnTable != fullName || rel.Table == "" {
 					continue

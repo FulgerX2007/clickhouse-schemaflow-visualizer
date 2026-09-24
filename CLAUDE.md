@@ -68,7 +68,7 @@ Per-engine parsing branches, all positional string splitting on `create_table_qu
 - `MergeTree`, `Replicated*` — leaf nodes; table name taken from `strings.Split(createQuery, " ")[2]`
 - `Dictionary*` — edge comes from the `loading_dependencies_database` / `loading_dependencies_table` columns (not from parsing `SOURCE(...)`; the README says otherwise)
 - `Distributed` — underlying table parsed out of `engine_full` by splitting on `'`, requiring ≥6 parts
-- `MaterializedView` — two edges: `source → mv` (from `FROM `) and `mv → destination` (from `strings.Split(createQuery, " ")[5]`)
+- `MaterializedView` — two edges, built after the loop by `viewRelations`: `source → mv` from the **source table's** `dependencies_database`/`dependencies_table` (not the SELECT text — `FROM (SELECT … FROM src JOIN …)` used to yield a node named `(SELECT`), and `mv → destination` from `strings.Split(createQuery, " ")[5]` when `[4]` is `TO`. An end that is not in `TableMetadata` (misread DDL, hidden database) is dropped, not drawn. `buildMVRelationshipsGraph` takes its source from the same edge via `viewSource`
 - anything else — a bare node with no edges
 
 **Caching:** these three vars are populated on first use and never invalidated. The sidebar ↻ button only re-fetches `/api/databases`, which returns the same cached map — a **process restart is the only way to pick up ClickHouse schema changes**. `GetTableColumns`, `BuildColumnIndex`, and `isDistributedTable` are not cached and hit ClickHouse on every call.
