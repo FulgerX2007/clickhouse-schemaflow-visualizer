@@ -28,6 +28,25 @@
         </div>
     </div>
 
+    <div id="sql-viewer" class="sql-viewer" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="sql-viewer-title">
+        <div class="palette-backdrop" data-sql-close></div>
+        <div class="sql-viewer-shell">
+            <div class="sql-viewer-header">
+                <div class="sql-viewer-heading">
+                    <span id="sql-viewer-engine" class="crumb-chip"></span>
+                    <h3 id="sql-viewer-title"></h3>
+                </div>
+                <div class="sql-viewer-actions">
+                    <button type="button" id="sql-viewer-open" class="sql-viewer-btn" title="Select this table in the diagrams">Open table</button>
+                    <button type="button" id="sql-viewer-copy" class="sql-viewer-btn">Copy</button>
+                    <button type="button" class="sql-viewer-btn" data-sql-close title="Close (esc)">✕</button>
+                </div>
+            </div>
+            <dl id="sql-viewer-meta" class="sql-viewer-meta"></dl>
+            <pre class="sql-code"><code id="sql-viewer-code"></code></pre>
+        </div>
+    </div>
+
     <script src="/static/js/vendor/dagre.min.js?v={{.BuildID}}" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0" crossorigin="anonymous" referrerpolicy="no-referrer" />
 </head>
@@ -85,6 +104,11 @@
                         <li><span class="glyph distributed">⋈</span> Distributed</li>
                         <li><span class="glyph mview">◐</span> Materialized View</li>
                         <li><span class="glyph dictionary">☱</span> Dictionary</li>
+                        <li><span class="glyph view">◇</span> View</li>
+                    </ul>
+                    <ul class="edge-types-legend">
+                        <li><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" class="legend-edge"/></svg> feeds</li>
+                        <li title="Read by a JOIN or dictGet. Rows inserted there do not trigger the view."><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" class="legend-edge lookup"/></svg> lookup (JOIN, dictGet)</li>
                     </ul>
                     <div class="metadata-toggle-container">
                         <label class="toggle-switch">

@@ -15,16 +15,19 @@ const (
 	EngineDistributed EngineType = "distributed"
 	EngineMView       EngineType = "mview"
 	EngineDictionary  EngineType = "dictionary"
+	EngineView        EngineType = "view"
 )
 
 // ClassifyEngine maps a raw engine name (e.g. "SummingMergeTree", "ReplicatedAggregatingMergeTree")
-// to one of the five semantic families used for visual styling.
+// to one of the six semantic families used for visual styling.
 func ClassifyEngine(engine string) EngineType {
 	switch {
 	case engine == "Distributed":
 		return EngineDistributed
 	case engine == "MaterializedView":
 		return EngineMView
+	case engine == "View":
+		return EngineView
 	case strings.HasPrefix(engine, "Dictionary"):
 		return EngineDictionary
 	case strings.HasPrefix(engine, "Replicated"):
@@ -44,6 +47,8 @@ type GraphNode struct {
 	TotalRows  *uint64    `json:"total_rows,omitempty"`
 	TotalBytes *uint64    `json:"total_bytes,omitempty"`
 	Current    bool       `json:"current,omitempty"`
+	// Refresh is a refreshable materialized view's schedule, e.g. "EVERY 1 MINUTE".
+	Refresh string `json:"refresh,omitempty"`
 }
 
 // GraphEdge is a directed edge between two GraphNodes.
@@ -51,6 +56,8 @@ type GraphEdge struct {
 	From  string `json:"from"`
 	To    string `json:"to"`
 	Label string `json:"label,omitempty"`
+	// Kind is "lookup" for a table a view reads without being triggered by it.
+	Kind RelationKind `json:"kind,omitempty"`
 }
 
 // DataFlowGraph is the structured payload returned by /api/v2/dataflow/:db/:table.
@@ -192,6 +199,7 @@ func addNode(nodes map[string]GraphNode, id string, current bool) {
 		n.EngineType = ClassifyEngine(meta.Engine)
 		n.TotalRows = meta.TotalRows
 		n.TotalBytes = meta.TotalBytes
+		n.Refresh = meta.Refresh
 	} else {
 		n.EngineType = EngineMergeTree
 	}
@@ -213,7 +221,7 @@ func walkForward(nodes map[string]GraphNode, edges map[string]GraphEdge, relatio
 			continue
 		}
 		seen[key] = true
-		edges[key] = GraphEdge{From: rel.DependsOnTable, To: rel.Table}
+		edges[key] = GraphEdge{From: rel.DependsOnTable, To: rel.Table, Kind: rel.Kind}
 		walkForward(nodes, edges, relations, rel.Table, seen, depth+1)
 	}
 }
@@ -231,7 +239,7 @@ func walkBackward(nodes map[string]GraphNode, edges map[string]GraphEdge, relati
 		key := rel.DependsOnTable + "->" + rel.Table
 		if !seen[key] {
 			seen[key] = true
-			edges[key] = GraphEdge{From: rel.DependsOnTable, To: rel.Table}
+			edges[key] = GraphEdge{From: rel.DependsOnTable, To: rel.Table, Kind: rel.Kind}
 		}
 		walkBackward(nodes, edges, relations, rel.DependsOnTable, seen, depth+1)
 	}

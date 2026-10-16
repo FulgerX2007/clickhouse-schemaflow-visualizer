@@ -9,6 +9,40 @@ tags matching `v*` (`.github/workflows/release.yml`, `.github/workflows/docker-p
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refreshable materialized views and plain Views were drawn with no source.** ClickHouse
+  records no dependency for either, and the view's `SELECT` was never read, so all 7
+  refreshable MVs and all 49 Views on a staging schema stood alone; a refreshable MV lost
+  its target too, because `… REFRESH EVERY 1 MINUTE APPEND TO db.t` put `TO` past the word
+  position the DDL split checked. Their sources now come from parsing the `SELECT` (FROM,
+  every JOIN, subqueries) and their target from the first `TO db.table` before the column
+  list. With the target found, Grafana column usage now also flows back through a
+  refreshable MV to the columns it reads.
+
+### Added
+
+- **Lookup edges.** A table an insert-triggered MV `JOIN`s, and a dictionary any view reads
+  with `dictGet`, is drawn as a dashed edge: it is read on every insert but inserts into it
+  do not fire the view. The sidebar legend explains both line styles.
+- **`View` engine type** with its own colour, glyph and legend entry, instead of looking
+  like a MergeTree table.
+- A refreshable MV's schedule (`↻ every 1 minute`) on its data-flow card.
+
+- **The full DDL of every table on the diagram.** Each card in the Data Flow and
+  Relationships views carries a `SQL` button that opens the table's `CREATE` statement in a
+  dialog — columns with their `DEFAULT`/`MATERIALIZED`/`ALIAS` expressions and codecs,
+  engine, partition/order/primary keys, TTL, settings, and a view's `TO` target and
+  `SELECT` — without selecting the table, so the diagram being checked stays on screen.
+  Clicking an expression label on a Relationships edge opens the view it belongs to with
+  that expression highlighted. The inspector gains a DDL section and shows each column's
+  default expression, codec and comment.
+- `GET /api/table/:database/:table` also returns `create_query` (pretty-printed by the
+  server's `formatQueryOrNull` where it exists, as stored otherwise), `create_formatted`,
+  `engine_full`, `as_select`, the table `comment`, and per-column `default_kind`,
+  `default_expression` and `compression_codec`. Quoted passwords in the DDL are replaced
+  with `'[HIDDEN]'` before it leaves the server.
+
 ## [2.3.1] - 2026-09-24
 
 ### Fixed

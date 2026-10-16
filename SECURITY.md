@@ -20,7 +20,11 @@ Read this before deciding where to run the visualizer.
 **The HTTP API has no authentication, no authorization and no rate limiting.** Anyone who
 can reach the port gets every endpoint, and the endpoints between them return the whole
 schema metadata of the connected ClickHouse — database, table and column names, types,
-comments, row and byte counts, and the stored `SELECT` of every materialized view. With
+comments, row and byte counts, the stored `SELECT` of every materialized view, and the
+full `CREATE` statement of every table. Quoted passwords in that DDL are replaced with
+`'[HIDDEN]'` (ClickHouse already masks them unless `display_secrets_in_show_and_select` is
+on), but a credential passed to an engine as a bare positional argument cannot be told
+apart from any other string and is returned as ClickHouse stores it. With
 the Grafana integration configured they also return dashboard titles, dashboard URLs and
 SQL snippets from panel queries.
 

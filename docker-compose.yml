@@ -7,11 +7,15 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: clickhouse-schemaflow-visualizer
+    # Published rather than network_mode: host — on macOS, Docker and Podman
+    # run containers in a VM, where "host" is the VM and nothing reaches the
+    # Mac. To reach a ClickHouse on this machine, set CLICKHOUSE_HOST to
+    # host.docker.internal (Docker) or host.containers.internal (Podman).
+    # HOST_PORT picks the port on this machine when 8080 is already taken.
     ports:
-      - "8080:8080"
+      - "${HOST_PORT:-8090}:8080"
     env_file: ".env"
     restart: unless-stopped
-    network_mode: "host"
 
 volumes:
   clickhouse-data:

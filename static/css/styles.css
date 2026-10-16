@@ -27,6 +27,8 @@
   --t-mview-bg:       #f5ecfd;
   --t-dictionary-fg:  #b48a00;
   --t-dictionary-bg:  #fbf3d6;
+  --t-view-fg:        #c2410c;
+  --t-view-bg:        #fdebe1;
 
   /* Column-usage verdicts. Only "unused" means safe to drop, so it is the one
      that reads as an action; the other three are deliberately quieter. */
@@ -409,6 +411,7 @@ main { overflow: hidden; }
 .fa-diagram-project { color: var(--t-distributed-fg) !important; }
 .fa-eye          { color: var(--t-mview-fg) !important; }
 .fa-book         { color: var(--t-dictionary-fg) !important; }
+.fa-glasses      { color: var(--t-view-fg) !important; }
 
 /* ─── Legend ─────────────────────────────────────────────────────────────── */
 .legend-container {
@@ -468,6 +471,24 @@ main { overflow: hidden; }
 .table-types-legend li .glyph.distributed { background: var(--t-distributed-bg); color: var(--t-distributed-fg); }
 .table-types-legend li .glyph.mview       { background: var(--t-mview-bg);       color: var(--t-mview-fg); }
 .table-types-legend li .glyph.dictionary  { background: var(--t-dictionary-bg);  color: var(--t-dictionary-fg); }
+.table-types-legend li .glyph.view        { background: var(--t-view-bg);        color: var(--t-view-fg); }
+
+.edge-types-legend {
+  list-style: none;
+  display: grid;
+  gap: 3px;
+  margin-top: 6px;
+}
+.edge-types-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-strong);
+}
+.legend-edge { stroke: var(--text-muted); stroke-width: 1.4; }
+.legend-edge.lookup { stroke-dasharray: 4 3; }
+.collapsible-header.collapsed ~ .edge-types-legend { display: none; }
 
 .collapsible-header.collapsed ~ .table-types-legend,
 .legend-container .collapsible-header.collapsed ~ .table-types-legend {
@@ -578,6 +599,7 @@ main { overflow: hidden; }
 #current-selection .crumb-chip.distributed { background: var(--t-distributed-bg); color: var(--t-distributed-fg); }
 #current-selection .crumb-chip.mview       { background: var(--t-mview-bg);       color: var(--t-mview-fg); }
 #current-selection .crumb-chip.dictionary  { background: var(--t-dictionary-bg);  color: var(--t-dictionary-fg); }
+#current-selection .crumb-chip.view        { background: var(--t-view-bg);        color: var(--t-view-fg); }
 
 .export-buttons { display: flex; gap: 6px; flex-shrink: 0; }
 .export-buttons button {
@@ -783,6 +805,7 @@ main { overflow: hidden; }
 .df-node.engine-distributed .df-rail { fill: var(--t-distributed-fg); }
 .df-node.engine-mview       .df-rail { fill: var(--t-mview-fg); }
 .df-node.engine-dictionary  .df-rail { fill: var(--t-dictionary-fg); }
+.df-node.engine-view        .df-rail { fill: var(--t-view-fg); }
 .df-node.current .df-rail { fill: var(--accent); }
 
 .df-title {
@@ -820,6 +843,8 @@ main { overflow: hidden; }
   stroke: var(--accent);
   stroke-width: 1.4;
 }
+/* A table a view reads without being triggered by it. */
+.df-edge.lookup { stroke-dasharray: 4 3; }
 
 /* Relationships — table cards with column rows */
 .rel-card {
@@ -844,6 +869,7 @@ main { overflow: hidden; }
 .rel-table.engine-distributed .rel-rail { fill: var(--t-distributed-fg); }
 .rel-table.engine-mview       .rel-rail { fill: var(--t-mview-fg); }
 .rel-table.engine-dictionary  .rel-rail { fill: var(--t-dictionary-fg); }
+.rel-table.engine-view        .rel-rail { fill: var(--t-view-fg); }
 .rel-table.current .rel-rail { fill: var(--accent); }
 
 .rel-role {
@@ -1247,6 +1273,7 @@ main { overflow: hidden; }
 .table-info-value.engine-chip.distributed { background: var(--t-distributed-bg); color: var(--t-distributed-fg); }
 .table-info-value.engine-chip.mview       { background: var(--t-mview-bg);       color: var(--t-mview-fg); }
 .table-info-value.engine-chip.dictionary  { background: var(--t-dictionary-bg);  color: var(--t-dictionary-fg); }
+.table-info-value.engine-chip.view        { background: var(--t-view-bg);        color: var(--t-view-fg); }
 .table-info-value.numeric { font-variant-numeric: tabular-nums; }
 .table-info-value.code {
   background: var(--bg);
@@ -1475,6 +1502,7 @@ footer {
 .palette-row[data-kind="table"]  .row-glyph.engine-distributed { background: var(--t-distributed-bg); color: var(--t-distributed-fg); }
 .palette-row[data-kind="table"]  .row-glyph.engine-mview       { background: var(--t-mview-bg);       color: var(--t-mview-fg); }
 .palette-row[data-kind="table"]  .row-glyph.engine-dictionary  { background: var(--t-dictionary-bg);  color: var(--t-dictionary-fg); }
+.palette-row[data-kind="table"]  .row-glyph.engine-view        { background: var(--t-view-bg);        color: var(--t-view-fg); }
 .palette-row[data-kind="column"] .row-glyph { background: var(--accent-bg); color: var(--accent-fg); }
 .palette-row[data-kind="engine"] .row-glyph { background: var(--border-soft); color: var(--text-muted); }
 
@@ -1715,3 +1743,174 @@ ul.usage-panels {
   border-left: 1px solid var(--border);
 }
 ul.usage-panels > li { padding: 2px 0; }
+
+/* ─── DDL: diagram chip, inspector section, viewer dialog ────────────────── */
+.sql-btn { cursor: pointer; }
+.sql-btn rect {
+  fill: var(--surface);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.sql-btn text {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  fill: var(--text-muted);
+  pointer-events: none;
+}
+.sql-btn:hover rect { fill: var(--accent-bg); stroke: var(--accent-border); }
+.sql-btn:hover text { fill: var(--accent-fg); }
+.rel-edge-label { cursor: default; }
+
+.column-extra {
+  flex-basis: 100%;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.column-extra .kw { color: var(--t-mview-fg); font-weight: 600; }
+.column-comment {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+.ddl-section {
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.ddl-section h4 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.ddl-section h4 .ddl-actions { display: flex; gap: 4px; }
+.ddl-section .sql-code { max-height: 340px; }
+
+.sql-viewer-btn {
+  font: 500 10.5px var(--font-mono);
+  color: var(--text-strong);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.sql-viewer-btn:hover { border-color: var(--accent-border); color: var(--accent-fg); background: var(--accent-bg); }
+.sql-viewer-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.sql-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow: auto;
+  white-space: pre;
+  tab-size: 4;
+}
+.sql-code .tok-kw   { color: var(--accent-fg); font-weight: 600; }
+.sql-code .tok-str  { color: var(--v-used-fg); }
+.sql-code .tok-num  { color: var(--t-replicated-fg); }
+.sql-code .tok-id   { color: var(--t-mview-fg); }
+.sql-code .tok-com  { color: var(--text-faint); font-style: italic; }
+.sql-code mark {
+  background: #fff3bf;
+  color: inherit;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px #f0d264;
+}
+
+.sql-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8vh;
+}
+.sql-viewer[hidden] { display: none; }
+.sql-viewer-shell {
+  position: relative;
+  width: min(880px, calc(100% - 32px));
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow:
+    0 1px 0 rgba(11, 13, 18, 0.04),
+    0 12px 32px rgba(11, 13, 18, 0.16),
+    0 2px 6px rgba(11, 13, 18, 0.06);
+  animation: palette-rise 0.14s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.sql-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.sql-viewer-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sql-viewer-heading h3 {
+  margin: 0;
+  font: 600 13px var(--font-mono);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.sql-viewer-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.sql-viewer .crumb-chip {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--border-soft);
+  color: var(--text-muted);
+}
+.sql-viewer .crumb-chip.mergetree   { background: var(--t-mergetree-bg);   color: var(--t-mergetree-fg); }
+.sql-viewer .crumb-chip.replicated  { background: var(--t-replicated-bg);  color: var(--t-replicated-fg); }
+.sql-viewer .crumb-chip.distributed { background: var(--t-distributed-bg); color: var(--t-distributed-fg); }
+.sql-viewer .crumb-chip.mview       { background: var(--t-mview-bg);       color: var(--t-mview-fg); }
+.sql-viewer .crumb-chip.dictionary  { background: var(--t-dictionary-bg);  color: var(--t-dictionary-fg); }
+.sql-viewer .crumb-chip.view        { background: var(--t-view-bg);        color: var(--t-view-fg); }
+.sql-viewer-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 11px;
+}
+.sql-viewer-meta:empty { display: none; }
+.sql-viewer-meta dt { color: var(--text-muted); }
+.sql-viewer-meta dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.sql-viewer .sql-code { flex: 1; min-height: 120px; }
+.sql-viewer-status { color: var(--text-muted); font-size: 11.5px; padding: 12px 0; }

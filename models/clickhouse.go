@@ -8,7 +8,9 @@ import (
 	"html"
 	"log"
 	"os"
+	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -39,7 +41,21 @@ type TableRelation struct {
 	DependsOnTable string
 	Table          string
 	Icon           string
+	// Kind is empty for an edge data flows along, and RelationLookup for a
+	// table a materialized view reads without being triggered by it.
+	Kind RelationKind
 }
+
+// RelationKind separates the two ways a view can read a table.
+//
+// An insert-triggered materialized view fires on inserts into one table only,
+// the one ClickHouse records in dependencies_table. A table it JOINs, or a
+// dictionary it calls dictGet on, is read on every insert but never causes
+// one: rows inserted there flow nowhere until the trigger table gets a row.
+// Drawn alike, the two would claim the view re-runs when a lookup changes.
+type RelationKind string
+
+const RelationLookup RelationKind = "lookup"
 
 type TableInfo struct {
 	Name       string
@@ -48,6 +64,8 @@ type TableInfo struct {
 	TotalBytes *uint64
 	Engine     string
 	Icon       string
+	// Refresh is a refreshable materialized view's schedule, e.g. "EVERY 1 MINUTE".
+	Refresh string
 }
 
 type ColumnInfo struct {
@@ -55,18 +73,30 @@ type ColumnInfo struct {
 	Type     string `json:"type"`
 	Position uint64 `json:"position"`
 	Comment  string `json:"comment"`
+	// DefaultKind is DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL; empty for a
+	// plain column.
+	DefaultKind       string `json:"default_kind,omitempty"`
+	DefaultExpression string `json:"default_expression,omitempty"`
+	CompressionCodec  string `json:"compression_codec,omitempty"`
 }
 
 type TableDetails struct {
 	Name         string       `json:"name"`
 	Database     string       `json:"database"`
 	Engine       string       `json:"engine"`
+	EngineFull   string       `json:"engine_full,omitempty"`
 	PrimaryKey   string       `json:"primary_key"`
 	SortingKey   string       `json:"sorting_key"`
 	PartitionKey string       `json:"partition_key"`
+	Comment      string       `json:"comment,omitempty"`
 	TotalRows    *uint64      `json:"total_rows"`
 	TotalBytes   *uint64      `json:"total_bytes"`
 	Columns      []ColumnInfo `json:"columns"`
+	// CreateQuery is the table's DDL, pretty-printed when the server has
+	// formatQueryOrNull and as stored otherwise. AsSelect is a view's SELECT.
+	CreateQuery     string `json:"create_query"`
+	CreateFormatted bool   `json:"create_formatted"`
+	AsSelect        string `json:"as_select,omitempty"`
 }
 
 // ColumnRelationship represents a column-to-column mapping
@@ -145,6 +175,7 @@ func NewClickHouseClient(config Config) (*ClickHouseClient, error) {
 
 type result struct {
 	createQuery string
+	asSelect    string
 	engineFull  string
 	engine      string
 	totalRows   *uint64
@@ -205,7 +236,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 
 	log.Println("Querying tables relations")
 	ctx := context.Background()
-	query := "SELECT create_table_query, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, dependencies_database, dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
+	query := "SELECT create_table_query, as_select, engine_full, engine, database, name, loading_dependencies_database, loading_dependencies_table, dependencies_database, dependencies_table, total_rows, total_bytes FROM system.tables ORDER BY name"
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tables: %v", err)
@@ -229,7 +260,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 		var loadingDependenciesDatabase []string
 		var dependenciesDatabase []string
 		var dependenciesTable []string
-		if err := rows.Scan(&res.createQuery, &res.engineFull, &res.engine, &database, &table, &loadingDependenciesDatabase, &loadingDependenciesTable, &dependenciesDatabase, &dependenciesTable, &res.totalRows, &res.totalBytes); err != nil {
+		if err := rows.Scan(&res.createQuery, &res.asSelect, &res.engineFull, &res.engine, &database, &table, &loadingDependenciesDatabase, &loadingDependenciesTable, &dependenciesDatabase, &dependenciesTable, &res.totalRows, &res.totalBytes); err != nil {
 			return nil, fmt.Errorf("failed to scan table data: %v", err)
 		}
 
@@ -246,7 +277,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 		}
 
 		fullTableName := database + "." + table
-		var icon string
+		var icon, refresh string
 
 		// ClickHouse lists, on a table's row, the views that read from it.
 		for i, dependent := range dependenciesTable {
@@ -303,15 +334,20 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 				}
 			}
 		} else if res.engine == "MaterializedView" { // Materialized View
-			queryParts := strings.Split(res.createQuery, " ")
 			icon = `<i class="fa-solid fa-eye"></i>`
 			DatabasesData[database][table] = generateTableListContent(icon, table, res.totalRows, res.totalBytes)
-			view := pendingView{Name: fullTableName, Icon: icon}
-			// "CREATE MATERIALIZED VIEW db.mv TO db.dst ..."
-			if len(queryParts) > 5 && queryParts[4] == "TO" {
-				view.Target = queryParts[5]
-			}
-			views = append(views, view)
+			refresh = refreshSchedule(res.createQuery)
+			views = append(views, pendingView{
+				Name:    fullTableName,
+				Target:  viewTarget(res.createQuery),
+				Icon:    icon,
+				Select:  res.asSelect,
+				Refresh: refresh,
+			})
+		} else if res.engine == "View" { // Plain (non-materialized) view
+			icon = `<i class="fa-solid fa-glasses"></i>`
+			DatabasesData[database][table] = generateTableListContent(icon, table, res.totalRows, res.totalBytes)
+			views = append(views, pendingView{Name: fullTableName, Icon: icon, Select: res.asSelect, Plain: true})
 		} else {
 			// Default case for other engines
 			icon = `<i class="fa-solid fa-table"></i>`
@@ -327,6 +363,7 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 			TotalBytes: res.totalBytes,
 			Engine:     res.engine,
 			Icon:       icon,
+			Refresh:    refresh,
 		}
 	}
 
@@ -341,32 +378,62 @@ func (c *ClickHouseClient) getTablesRelations() ([]TableRelation, error) {
 	return tables, nil
 }
 
-// pendingView is a materialized view whose edges wait for the whole of
-// system.tables to be read.
+// pendingView is a materialized or plain view whose edges wait for the whole
+// of system.tables to be read.
 type pendingView struct {
 	Name   string // db.view
 	Target string // db.table from "TO db.table"; empty for a view with an inner table
 	Icon   string
+	Select string // as_select
+	// Refresh is set for a refreshable materialized view, Plain for a View.
+	// Neither has a trigger table: ClickHouse records no dependency for them,
+	// so their sources come from the SELECT alone.
+	Refresh string
+	Plain   bool
 }
 
 // viewRelations builds the source → view and view → target edges.
 //
-// Sources come from ClickHouse's dependencies columns, not from the SELECT:
-// the first "FROM " of "SELECT ... FROM (SELECT ... FROM db.src JOIN ...)" is
-// followed by "(SELECT", which used to become a node of that name. Every end
-// must be a table in known, so a name the DDL split misreads, or one in a
-// hidden database, is dropped rather than drawn as a node nothing can open.
+// A trigger source comes from ClickHouse's dependencies columns, not from the
+// SELECT: the first "FROM " of "SELECT ... FROM (SELECT ... FROM db.src JOIN
+// ...)" is followed by "(SELECT", which used to become a node of that name.
+// Every other table the SELECT reads is found by parsing it. For an
+// insert-triggered view those are lookups; a refreshable view and a plain view
+// have no trigger, and everything they read feeds them. Every end must be a
+// table in known, so a name the DDL split misreads, or one in a hidden
+// database, is dropped rather than drawn as a node nothing can open.
 func viewRelations(views []pendingView, sources map[string][]string, known map[string]TableInfo) []TableRelation {
 	var out []TableRelation
 	for _, v := range views {
 		edges := 0
-		for _, src := range sources[v.Name] {
-			if _, ok := known[src]; !ok {
-				continue
+		linked := map[string]bool{v.Name: true, v.Target: true}
+		add := func(src string, kind RelationKind) {
+			if linked[src] {
+				return
 			}
-			out = append(out, TableRelation{DependsOnTable: src, Table: v.Name, Icon: v.Icon})
+			if _, ok := known[src]; !ok {
+				return
+			}
+			linked[src] = true
+			out = append(out, TableRelation{DependsOnTable: src, Table: v.Name, Icon: v.Icon, Kind: kind})
 			edges++
 		}
+
+		for _, src := range sources[v.Name] {
+			add(src, "")
+		}
+		reads, dictionaries := selectReads(v.Select, v.Name)
+		readKind := RelationLookup
+		if v.Refresh != "" || v.Plain {
+			readKind = ""
+		}
+		for _, src := range reads {
+			add(src, readKind)
+		}
+		for _, dictionary := range dictionaries {
+			add(dictionary, RelationLookup)
+		}
+
 		if v.Target != "" {
 			if _, ok := known[v.Target]; ok {
 				out = append(out, TableRelation{DependsOnTable: v.Name, Table: v.Target, Icon: v.Icon})
@@ -385,10 +452,11 @@ func viewRelations(views []pendingView, sources map[string][]string, known map[s
 // viewSource returns the table a materialized view reads from, as recorded in
 // relations by viewRelations, or "" when none is known. A Distributed wrapper
 // over the view is also an edge ending at it, pointing the other way, so it
-// is skipped.
+// is skipped, and so is a lookup, which is read alongside the source rather
+// than instead of it.
 func viewSource(relations []TableRelation, metadata map[string]TableInfo, view string) string {
 	for _, rel := range relations {
-		if rel.Table != view || rel.DependsOnTable == "" {
+		if rel.Table != view || rel.DependsOnTable == "" || rel.Kind == RelationLookup {
 			continue
 		}
 		if metadata[rel.DependsOnTable].Engine == "Distributed" {
@@ -397,6 +465,73 @@ func viewSource(relations []TableRelation, metadata map[string]TableInfo, view s
 		return rel.DependsOnTable
 	}
 	return ""
+}
+
+// qualifiedName matches db.table with either part optionally backticked.
+const qualifiedName = "(?:`[^`]+`|[A-Za-z0-9_$]+)\\.(?:`[^`]+`|[A-Za-z0-9_$]+)"
+
+var (
+	// The target always precedes the column list, so only the text before the
+	// first "(" is searched. A refreshable view puts REFRESH, SETTINGS and
+	// APPEND between the name and TO, which the old positional split missed.
+	viewTargetPattern = regexp.MustCompile(`(?i)\bTO\s+(` + qualifiedName + `)`)
+	refreshPattern    = regexp.MustCompile(`(?i)\bREFRESH\s+((?:EVERY|AFTER)\s+\d+\s+[A-Z]+(?:\s+OFFSET\s+\d+\s+[A-Z]+)?)`)
+	// dictGet('db.dict', ...) and the other dictGet*/dictHas forms. The
+	// dictionary is named by a string, so the SQL parser does not see it.
+	dictionaryPattern = regexp.MustCompile(`(?i)\bdict(?:Get\w*|Has|IsIn)\s*\(\s*'([^']+)'`)
+)
+
+// viewTarget returns the db.table a view writes to, or "" for a view with an
+// inner table.
+func viewTarget(createQuery string) string {
+	header := createQuery
+	if i := strings.Index(header, "("); i >= 0 {
+		header = header[:i]
+	}
+	match := viewTargetPattern.FindStringSubmatch(header)
+	if match == nil {
+		return ""
+	}
+	return strings.ReplaceAll(match[1], "`", "")
+}
+
+// refreshSchedule returns "EVERY 1 MINUTE" for a refreshable view, or "".
+func refreshSchedule(createQuery string) string {
+	match := refreshPattern.FindStringSubmatch(createQuery)
+	if match == nil {
+		return ""
+	}
+	return strings.ToUpper(strings.Join(strings.Fields(match[1]), " "))
+}
+
+// selectReads lists the tables a view's SELECT reads, through the same parser
+// the Grafana feature uses — FROM, every JOIN and every subquery — plus the
+// dictionaries it calls dictGet on. Unqualified names take the view's
+// database. The parser does not know every ClickHouse join form — it refuses
+// "ANTI LEFT JOIN" — so a SELECT it rejects falls back to the word after each
+// FROM and JOIN. That can name an alias or a CTE, which viewRelations drops
+// because it is not a known table.
+func selectReads(selectQuery, view string) (tables, dictionaries []string) {
+	if strings.TrimSpace(selectQuery) == "" {
+		return nil, nil
+	}
+	database, _ := splitQualified(view)
+	result := resolveQueryAST(normalizeQuery(selectQuery, nil), database, "")
+	tables = result.Tables
+	if result.ParseError != "" {
+		seen := map[string]bool{}
+		for _, match := range heuristicTablePattern.FindAllStringSubmatch(selectQuery, -1) {
+			table := qualifyName(strings.Trim(match[1], "`\"'"), database)
+			if table != "" && !seen[table] {
+				seen[table] = true
+				tables = append(tables, table)
+			}
+		}
+	}
+	for _, match := range dictionaryPattern.FindAllStringSubmatch(selectQuery, -1) {
+		dictionaries = append(dictionaries, qualifyName(match[1], database))
+	}
+	return tables, dictionaries
 }
 
 // AllowedDatabase reports whether a database is one this app will show.
@@ -518,24 +653,31 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 
 	// First get basic table info
 	tableQuery := `
-		SELECT engine, total_rows, total_bytes, primary_key, sorting_key, partition_key
+		SELECT engine, engine_full, total_rows, total_bytes, primary_key, sorting_key, partition_key,
+		       comment, create_table_query, as_select
 		FROM system.tables
 		WHERE database = ? AND name = ?
 	`
 
-	var engine, primaryKey, sortingKey, partitionKey string
+	var engine, engineFull, primaryKey, sortingKey, partitionKey, comment, createQuery, asSelect string
 	var totalRows, totalBytes *uint64
 
 	row := c.conn.QueryRow(ctx, tableQuery, database, table)
-	if err := row.Scan(&engine, &totalRows, &totalBytes, &primaryKey, &sortingKey, &partitionKey); err != nil {
+	if err := row.Scan(&engine, &engineFull, &totalRows, &totalBytes, &primaryKey, &sortingKey, &partitionKey,
+		&comment, &createQuery, &asSelect); err != nil {
 		return nil, fmt.Errorf("failed to get table info: %v", err)
+	}
+
+	formatted, ok := c.formatCreateQuery(ctx, database, table)
+	if ok {
+		createQuery = formatted
 	}
 
 	// Get column information
 	columnsQuery := `
-		SELECT name, type, position, comment
-		FROM system.columns 
-		WHERE database = ? AND table = ? 
+		SELECT name, type, position, comment, default_kind, default_expression, compression_codec
+		FROM system.columns
+		WHERE database = ? AND table = ?
 		ORDER BY position
 	`
 
@@ -548,7 +690,8 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 	var columns []ColumnInfo
 	for rows.Next() {
 		var col ColumnInfo
-		if err := rows.Scan(&col.Name, &col.Type, &col.Position, &col.Comment); err != nil {
+		if err := rows.Scan(&col.Name, &col.Type, &col.Position, &col.Comment,
+			&col.DefaultKind, &col.DefaultExpression, &col.CompressionCodec); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %v", err)
 		}
 		columns = append(columns, col)
@@ -559,16 +702,63 @@ func (c *ClickHouseClient) GetTableColumns(database, table string) (*TableDetail
 	}
 
 	return &TableDetails{
-		Name:         table,
-		Database:     database,
-		Engine:       engine,
-		PrimaryKey:   primaryKey,
-		SortingKey:   sortingKey,
-		PartitionKey: partitionKey,
-		TotalRows:    totalRows,
-		TotalBytes:   totalBytes,
-		Columns:      columns,
+		Name:            table,
+		Database:        database,
+		Engine:          engine,
+		EngineFull:      redactSecrets(engineFull),
+		PrimaryKey:      primaryKey,
+		SortingKey:      sortingKey,
+		PartitionKey:    partitionKey,
+		Comment:         comment,
+		TotalRows:       totalRows,
+		TotalBytes:      totalBytes,
+		Columns:         columns,
+		CreateQuery:     redactSecrets(createQuery),
+		CreateFormatted: ok,
+		AsSelect:        redactSecrets(asSelect),
 	}, nil
+}
+
+// formatUnsupported is set once the server has refused formatQueryOrNull, so a
+// ClickHouse older than the function is asked once rather than on every click.
+var formatUnsupported atomic.Bool
+
+// formatCreateQuery pretty-prints a table's DDL on the server. system.tables
+// stores it on one line, which for a materialized view puts the whole SELECT
+// on that line too. It is a separate query so that a server without the
+// function costs the formatting and nothing else.
+func (c *ClickHouseClient) formatCreateQuery(ctx context.Context, database, table string) (string, bool) {
+	if formatUnsupported.Load() {
+		return "", false
+	}
+	var formatted *string
+	row := c.conn.QueryRow(ctx,
+		"SELECT formatQueryOrNull(create_table_query) FROM system.tables WHERE database = ? AND name = ?",
+		database, table)
+	if err := row.Scan(&formatted); err != nil {
+		if strings.Contains(err.Error(), "UNKNOWN_FUNCTION") || strings.Contains(err.Error(), "Unknown function") {
+			formatUnsupported.Store(true)
+		}
+		log.Printf("formatting the DDL of %s.%s: %v", database, table, err)
+		return "", false
+	}
+	if formatted == nil || *formatted == "" {
+		return "", false
+	}
+	return *formatted, true
+}
+
+// secretPattern matches a quoted password: dictionary sources write
+// PASSWORD 'x', named collections and settings write password = 'x'.
+var secretPattern = regexp.MustCompile(`(?i)(\bpassword\b\s*=?\s*)'(?:[^'\\]|\\.)*'`)
+
+// redactSecrets hides quoted passwords in DDL. ClickHouse masks them itself in
+// system.tables unless display_secrets_in_show_and_select is on, but older
+// servers do not, and the API is unauthenticated. Credentials passed to an
+// engine as plain positional arguments (MySQL('host', 'db', 'tbl', 'user',
+// 'pass')) carry no keyword and cannot be found this way.
+func redactSecrets(ddl string) string {
+	return secretPattern.ReplaceAllString(ddl, "${1}'[HIDDEN]'")
 }
 
 // parseViewQuery extracts the SELECT statement from a CREATE MATERIALIZED VIEW query

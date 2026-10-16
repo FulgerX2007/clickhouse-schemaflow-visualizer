@@ -43,7 +43,7 @@ docker-compose up -d
   - `GET /columns` — flat column index across all visible tables (used by the `Ctrl+K` / `⌘K` command palette)
   - `GET /dataflow/:database/:table` — table-level DAG (upstream sources + downstream materializations) for the selected table
   - `GET /relationships/:database/:table` — column-level DAG with transformation expressions on the edges
-  - `GET /table/:database/:table` — column details for a single table (used by the inspector panel)
+  - `GET /table/:database/:table` — column details plus the table's DDL (`create_query`, pretty-printed via `formatQueryOrNull` when the server has it; `redactSecrets` masks quoted passwords). Used by the inspector and by the DDL dialog every diagram card's `SQL` button opens
 
   Plus four routes for the optional Grafana column-usage feature (see below):
   - `GET /grafana/status` — is dashboard usage available, and if not why
@@ -68,7 +68,12 @@ Per-engine parsing branches, all positional string splitting on `create_table_qu
 - `MergeTree`, `Replicated*` — leaf nodes; table name taken from `strings.Split(createQuery, " ")[2]`
 - `Dictionary*` — edge comes from the `loading_dependencies_database` / `loading_dependencies_table` columns (not from parsing `SOURCE(...)`; the README says otherwise)
 - `Distributed` — underlying table parsed out of `engine_full` by splitting on `'`, requiring ≥6 parts
-- `MaterializedView` — two edges, built after the loop by `viewRelations`: `source → mv` from the **source table's** `dependencies_database`/`dependencies_table` (not the SELECT text — `FROM (SELECT … FROM src JOIN …)` used to yield a node named `(SELECT`), and `mv → destination` from `strings.Split(createQuery, " ")[5]` when `[4]` is `TO`. An end that is not in `TableMetadata` (misread DDL, hidden database) is dropped, not drawn. `buildMVRelationshipsGraph` takes its source from the same edge via `viewSource`
+- `MaterializedView` and `View` — edges built after the loop by `viewRelations`, from `as_select` as well as the DDL:
+  - **trigger source → mv** from the **source table's** `dependencies_database`/`dependencies_table`. Not from the SELECT text — `FROM (SELECT … FROM src JOIN …)` used to yield a node named `(SELECT`. ClickHouse records only the table whose inserts fire the view; a table read in a `WITH` clause does not count, even when it comes first.
+  - **every other table the SELECT reads**, found by `selectReads` with the Grafana feature's SQL parser (FROM, JOIN, subqueries), plus `dictGet('db.dict', …)` dictionaries by regex. The parser refuses `ANTI LEFT JOIN`, so a rejected SELECT falls back to the word after each FROM/JOIN. For an insert-triggered MV these are `Kind: RelationLookup` edges — read on every insert, never a trigger. A **refreshable** MV (`REFRESH EVERY/AFTER`) and a **plain View** have no trigger recorded at all, so everything they read is an ordinary edge; dictionaries are lookups everywhere. Before this, all 7 refreshable MVs and all 49 Views on the staging schema were drawn with no source.
+  - **mv → destination** from `viewTarget`: the first `TO db.table` before the column list. A positional split broke on `… REFRESH EVERY 1 MINUTE APPEND TO …`.
+  - The view's own target is never also drawn as its source (the drain pattern reads its target to dedupe), and an end not in `TableMetadata` (misread DDL, hidden database, an alias from the FROM/JOIN fallback) is dropped, not drawn. `viewSource` skips lookups, so `buildMVRelationshipsGraph` still gets the trigger table.
+  - `refreshSchedule` stores `EVERY 1 MINUTE` in `TableInfo.Refresh`; the data-flow node carries it as `refresh` and the card prints it.
 - anything else — a bare node with no edges
 
 **Caching:** these three vars are populated on first use and never invalidated. The sidebar ↻ button only re-fetches `/api/databases`, which returns the same cached map — a **process restart is the only way to pick up ClickHouse schema changes**. `GetTableColumns`, `BuildColumnIndex`, and `isDistributedTable` are not cached and hit ClickHouse on every call.
@@ -80,7 +85,7 @@ The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafa
 ### Graph builders (`models/graph.go`)
 
 - Node IDs are plain `database.table` strings — no hashing. `walkForward`/`walkBackward` traverse `TableRelations` from the selected table, deduping edges via a shared `seen` map and bounded by `maxRelationDepth` (50).
-- `ClassifyEngine` collapses raw engine names into five `EngineType` values (`mergetree`, `replicated`, `distributed`, `mview`, `dictionary`). These strings are the styling contract with the frontend — they must stay in sync with `classifyEngine()` in `static/js/app.js`, the `glyphFor()` map, the legend in `static/html/index.html`, and the CSS classes in `static/css/styles.css`.
+- `ClassifyEngine` collapses raw engine names into six `EngineType` values (`mergetree`, `replicated`, `distributed`, `mview`, `dictionary`, `view`). These strings are the styling contract with the frontend — they must stay in sync with `classifyEngine()` in `static/js/app.js`, the `glyphFor()` map, the legend in `static/html/index.html`, and the CSS classes in `static/css/styles.css`.
 - `BuildRelationshipsGraph` branches on engine: MVs get real column mappings parsed from the stored SELECT (with the expression as the edge label); everything else falls back to `areColumnsRelated` name/type heuristics (exact match, `*_id` ↔ `id`, UUID and DateTime pairings), plus a single-column-to-single-column fallback.
 - `Distributed` tables are deliberately **excluded** from relationship graphs (`isDistributedTable` guards), since they'd duplicate their local table's columns.
 - Graph payloads are pure JSON and `diagram.js` builds SVG via `createElementNS` — no string templating and no sanitisation layer on this path. Keep it that way; don't reintroduce HTML-string assembly for diagram content.
@@ -89,6 +94,7 @@ The one component that *does* invalidate is `models.GrafanaIndex` (`models/grafa
 
 - `static/html/index.html` is served through `html/template` (not `router.Static`) so asset URLs carry `?v={{.BuildID}}`, a per-process cache-buster. **Any new CSS/JS tag must include `?v={{.BuildID}}`** or it will be cached across upgrades. Everything under `/static` is served with `Cache-Control: no-cache`.
 - `diagram.js` exposes `window.SchemaDiagram.renderDataFlow(container, graph, {onNodeClick})`, `.renderRelationships(container, graph, {onTableClick})` and `.renderDashboardUsage(container, usage, {engineType, hideUnconnected, onOpen})`; `app.js` owns sidebar, palette, inspector, and Export HTML.
+- **The DDL dialog never selects the table.** `onShowSql` (passed to both renderers) opens `#sql-viewer` and leaves the diagram alone — selecting redraws the graph around the new table, the opposite of what someone checking a pipeline wants. The DDL is rendered by `highlightSql()` as text nodes and spans, never `innerHTML`; `tableDetailsCache` holds each table's details for the page's life. Export HTML strips the `.sql-btn` chips from the clone.
 - Export HTML inlines `commonDiagramCss()` from `app.js`, so diagram styling lives in two places — update both when changing node/edge appearance. An SVG `rect` with no `fill` paints **black**, so every transparent hit-target rule has to be in both copies; leaving `.rel-col-hit` out of the export copy turned every column row of an exported diagram into a black bar.
 
 ### Grafana column usage (optional)
@@ -198,7 +204,7 @@ There are no Go tests; the release workflow runs `go test ./...` (a no-op today)
 
 Manual verification uses `docker-compose.clickhouse-test.yml`, which boots ZooKeeper (`:2181`) and ClickHouse (`:9000` native, `:8123` HTTP, `default`/`default`) and seeds `scripts/clickhouse_test_engines.sql`. The seed creates `raw` (MergeTree + ReplicatedMergeTree with Distributed wrappers) and `aggregated` (ReplicatedAggregatingMergeTree + SummingMergeTree fed by Materialized Views), which between them exercise every parsing branch above. Re-seed with `docker compose -f docker-compose.clickhouse-test.yml down -v` then `up -d`.
 
-`docker-compose.yml` reads the app's connection settings from `.env` (gitignored) and runs with `network_mode: host`.
+`docker-compose.yml` reads the app's connection settings from `.env` (gitignored) and publishes `${HOST_PORT:-8080}:8080`. It used to run with `network_mode: host`, which on macOS (Docker or Podman, both VM-backed) binds inside the VM and is unreachable from the Mac.
 
 **The test stack does not.** `docker-compose.clickhouse-test.yml` pins `CLICKHOUSE_*` in the service's `environment:` block, which overrides `env_file`, so `up` works whatever `.env` holds — a developer's `.env` normally points at a real ClickHouse, and aiming the test container at production would be both wrong and dangerous. `.env` is still read, marked `required: false`, for the settings the stack does not pin: `GRAFANA_*` and `GIN_MODE`. The app runs on a bridge network alongside `clickhouse-test-engines` and reaches it as host `clickhouse`.
 

@@ -1,8 +1,8 @@
 /* Dagre-laid-out SVG renderer for ClickHouse Schema Flow Visualizer.
  *
  * Exports:
- *   renderDataFlow(container, graph, { onNodeClick })
- *   renderRelationships(container, graph, { onTableClick })
+ *   renderDataFlow(container, graph, { onNodeClick, onShowSql })
+ *   renderRelationships(container, graph, { onTableClick, onShowSql })
  *   renderDashboardUsage(container, usage, { engineType, hideUnconnected, panelMode, onOpen })
  *
  * graph payloads come from /api/dataflow/:db/:table and
@@ -10,6 +10,11 @@
  * payload is the TableUsage from /api/grafana/usage/:db/:table — see
  * models/usage.go. renderDashboardUsage never builds a URL itself; onOpen hands
  * the reference back to the caller, which owns the scheme check.
+ *
+ * onShowSql(id, { highlight }) is called from a card's SQL button and from an
+ * expression label; it opens the DDL without selecting the table, so the
+ * diagram the reader is checking stays on screen. Without it no button is
+ * drawn.
  *
  * No string-templating, no parser sanitisation; nodes are drawn as the
  * Variant A "colored rail" card straight from data. */
@@ -161,7 +166,7 @@
     const NODE_H_BASE = 50;
     const NODE_H_WITH_META = 70;
 
-    function buildDataFlowNode(node) {
+    function buildDataFlowNode(node, onShowSql) {
         const hasMeta = node.total_rows != null || node.total_bytes != null;
         const h = hasMeta ? NODE_H_WITH_META : NODE_H_BASE;
         const engineClass = `engine-${node.engine_type || 'mergetree'}`;
@@ -206,7 +211,10 @@
         }, tbName);
         g.appendChild(title);
 
-        const subParts = [dbName, engineName].filter(Boolean).join(' · ');
+        // A refreshable view has no trigger table, so its schedule is the only
+        // thing that says when data moves through it.
+        const refresh = node.refresh ? `↻ ${node.refresh.toLowerCase()}` : '';
+        const subParts = [dbName, engineName, refresh].filter(Boolean).join(' · ');
         if (subParts) {
             g.appendChild(el('text', {
                 class: 'df-sub',
@@ -237,6 +245,11 @@
             g.appendChild(pinG);
         }
 
+        // Bottom-right: the top-right corner belongs to the CURRENT pin.
+        if (onShowSql) {
+            g.appendChild(sqlButton(NODE_W - SQL_BTN_W - 8, h - SQL_BTN_H - 6, node.id, onShowSql));
+        }
+
         return { g, w: NODE_W, h };
     }
 
@@ -264,12 +277,12 @@
 
         const nodeGs = new Map();
         for (const n of graph.nodes) {
-            const { g, w, h } = buildDataFlowNode(n);
+            const { g, w, h } = buildDataFlowNode(n, opts.onShowSql);
             nodeGs.set(n.id, g);
             dg.setNode(n.id, { width: w, height: h });
         }
         for (const e of graph.edges) {
-            dg.setEdge(e.from, e.to, { label: e.label });
+            dg.setEdge(e.from, e.to, { label: e.label, kind: e.kind });
         }
 
         dagre.layout(dg);
@@ -297,11 +310,16 @@
             const fromNode = graph.nodes.find((n) => n.id === e.v);
             const toNode = graph.nodes.find((n) => n.id === e.w);
             const active = (fromNode && fromNode.current) || (toNode && toNode.current);
+            const lookup = edge.kind === 'lookup';
             const path = el('path', {
-                class: 'df-edge' + (active ? ' active' : ''),
+                class: 'df-edge' + (active ? ' active' : '') + (lookup ? ' lookup' : ''),
                 d: buildEdgePath(edge.points),
                 'marker-end': `url(#${active ? 'df-arrow-active' : 'df-arrow'})`,
             });
+            if (lookup) {
+                path.appendChild(el('title', null,
+                    `${e.w} reads ${e.v} by JOIN or dictGet; inserts into ${e.v} do not trigger it`));
+            }
             edgesG.appendChild(path);
         }
 
@@ -340,7 +358,7 @@
     const TABLE_HEADER_H = 38;
     const TABLE_W = 240;
 
-    function buildRelTable(table) {
+    function buildRelTable(table, onShowSql) {
         const engineClass = `engine-${table.engine_type || 'mergetree'}`;
         const isCurrent = table.role === 'current';
         const colCount = table.columns.length;
@@ -374,13 +392,19 @@
         // omitted when the engine name would otherwise crash into it (e.g.
         // ReplicatedAggregatingMergeTree, 30 chars) — the highlight halo and
         // arrow direction already convey the role visually.
+        // The SQL chip takes the right end of the top row, so the engine name
+        // moves left of it and the role gives way sooner.
         const engineName = table.engine || '';
-        if (engineName.length <= 24) {
+        const engineRight = onShowSql ? TABLE_W - SQL_BTN_W - 14 : TABLE_W - 12;
+        if (engineName.length <= (onShowSql ? 19 : 24)) {
             g.appendChild(el('text', { class: 'rel-role', x: 14, y: 14 }, table.role));
         }
         g.appendChild(el('text', {
-            class: 'rel-engine', x: TABLE_W - 12, y: 14, 'text-anchor': 'end',
+            class: 'rel-engine', x: engineRight, y: 14, 'text-anchor': 'end',
         }, engineName));
+        if (onShowSql) {
+            g.appendChild(sqlButton(TABLE_W - SQL_BTN_W - 6, 3, table.id, onShowSql));
+        }
         g.appendChild(el('text', { class: 'rel-name', x: 14, y: 30 }, table.table));
 
         g.appendChild(el('line', {
@@ -434,7 +458,7 @@
         const tableMap = new Map(graph.tables.map((t) => [t.id, t]));
         const builders = new Map();
         for (const t of graph.tables) {
-            builders.set(t.id, buildRelTable(t));
+            builders.set(t.id, buildRelTable(t, opts.onShowSql));
         }
 
         // Dagre layout — table-level only; column row positions are computed
@@ -557,6 +581,17 @@
                 titleEl.appendChild(document.createTextNode(e.expression));
                 text.appendChild(titleEl);
                 labelEl.appendChild(text);
+                if (opts.onShowSql) {
+                    // The expression lives in the view's SELECT, so open the
+                    // view's DDL with the expression marked.
+                    const viewId = [e.to_table, e.from_table]
+                        .find((id) => tableMap.get(id) && tableMap.get(id).engine_type === 'mview') || e.to_table;
+                    labelEl.style.cursor = 'pointer';
+                    labelEl.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        opts.onShowSql(viewId, { highlight: e.expression });
+                    });
+                }
                 edgesG.appendChild(labelEl);
             }
 
@@ -1525,6 +1560,28 @@
         if (!s) return '';
         if (s.length <= maxChars) return s;
         return s.slice(0, Math.max(8, maxChars - 1)) + '…';
+    }
+
+    // sqlButton draws the small "SQL" chip a card carries. The click is stopped
+    // here because the card's own click selects the table and redraws the
+    // diagram, which is exactly what reading the DDL should not do.
+    const SQL_BTN_W = 30;
+    const SQL_BTN_H = 15;
+    function sqlButton(x, y, id, onShowSql) {
+        const g = el('g', {
+            class: 'sql-btn',
+            transform: `translate(${x},${y})`,
+            'data-interactive': '1',
+            role: 'button',
+        });
+        g.appendChild(el('rect', { width: SQL_BTN_W, height: SQL_BTN_H, rx: 3 }));
+        g.appendChild(el('text', { x: SQL_BTN_W / 2, y: 10.5, 'text-anchor': 'middle' }, 'SQL'));
+        g.appendChild(el('title', null, `Show the DDL of ${id}`));
+        g.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            onShowSql(id);
+        });
+        return g;
     }
 
     // Export

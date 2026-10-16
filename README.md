@@ -31,6 +31,8 @@ An open-source web application for visualizing ClickHouse table relationships. I
 - 🧭 **Data Flow** view — table-level upstream sources and downstream materializations for the selected table
 - 🪢 **Relationships** view — column-level mapping with the parsed transformation expression on each edge (e.g. `toStartOfHour(scheduled_departure)`, `avgState(delay_minutes)`)
 - 🎨 Engine-type icons and colour coding for MergeTree, Replicated, Distributed, MaterializedView, and Dictionary engines
+- 📜 **SQL** button on every diagram card — the table's full DDL (columns with `DEFAULT`/`MATERIALIZED`/`ALIAS` expressions and codecs, engine, keys, TTL, settings, and a view's `SELECT`) in a dialog, without leaving the diagram; click an expression label to open its view with the expression highlighted. The inspector shows the same DDL
+- 🧩 Lineage through every kind of view: refreshable materialized views (with their `REFRESH` schedule on the card), plain `View`s, and the tables an MV `JOIN`s or reads with `dictGet`, drawn dashed as lookups because inserts there do not trigger the view
 - 🔦 Click a column in the Relationships view to highlight its full data path through the pipeline
 - ⌨️ Live sidebar filter and a `Ctrl+K` / `⌘K` command palette to jump to any table, column, or engine
 - 📈 Optional metadata overlay showing row counts and on-disk size per table
